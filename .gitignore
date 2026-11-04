@@ -1,0 +1,6 @@
+# Herdr regenerates editor metadata locally.
+**/gpui-kit.d.ts
+**/herdr.d.ts
+**/jsconfig.json
+**/*.error
+.DS_Store
