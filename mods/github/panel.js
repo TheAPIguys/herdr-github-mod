@@ -3,6 +3,8 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, theme, nextCommand, openOverlay } from "herdr";
 import { summarizeChecks, checksIcon } from "./checks.js";
 import { openUrl } from "./open.js";
+import { IssueReader } from "./issue-reader.js";
+import { issueTarget } from "./issue-model.js";
 
 const REFRESH_MS = 60000;
 const LIMIT = "50";
@@ -105,6 +107,7 @@ export class Panel {
 
   // A new repo: drop repository-specific filters and load its labels and milestones.
   resetFor(context, cwd, on, cx) {
+    if (this.reader) { this.reader.nav.close(); this.reader = null; }
     this.context = context; this.items = { prs: [], issues: [] }; this.error = null; this.repoLabels = [];
     this.filters = { ...this.filters, labels: new Set(), milestone: null };
     this.repoMilestones = []; this.milestonesError = null; this.milestonesLoading = Boolean(cwd);
@@ -233,9 +236,17 @@ export class Panel {
       .children(issue.labels.slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)));
   }
 
-  startAgent(issue) {
-    const { cwd, on } = location();
+  startAgent(issue, source = location()) {
+    const { cwd, on } = source;
     openOverlay({ mod: "issue-agent", kind: "dialog", width: 480, height: 620, props: { issue, cwd, on } });
+  }
+
+  /** Open issues in-app; the original checkout remains the worktree/agent launch context. */
+  openIssue(item, cx) {
+    const target = issueTarget(item.url, item.url);
+    if (!target) return openUrl(item.url);
+    this.reader = new IssueReader(location(), target, (issue, source) => this.startAgent(issue, source));
+    this.reader.open(target, cx);
   }
 
   agentButton(issue, t) {
@@ -249,7 +260,9 @@ export class Panel {
     const meta = this.tab === "prs" ? this.prMeta(item, t) : this.issueMeta(item, t);
     const date = item[this.filters.sort.date] ?? item.updatedAt;
     return v_flex().id(`gh-${this.tab}-${item.number}`).flex_none().px(10).py(7).gap(3).rounded(7).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click(() => openUrl(item.url))
+      .hover((s) => s.bg(t.hover)).on_click((_event, cx) => {
+        if (this.tab === "issues") this.openIssue(item, cx); else openUrl(item.url);
+      })
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().text_size(11).text_color(t.accent).child(`#${item.number}`))
         .child(div().flex_1().min_w(0).whitespace_normal().text_size(14).child(item.title))
@@ -268,6 +281,7 @@ export class Panel {
 
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
+    if (this.reader?.nav.current) return this.reader.render();
     const t = theme(), list = this.items[this.tab];
     return v_flex().id("github").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)

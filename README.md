@@ -9,6 +9,9 @@ This is not the separate `git-d-herdr` terminal dashboard.
 - Milestone filter: all milestones, one named milestone, or no milestone.
   Closed milestones are available too; lists show **open** issues/PRs only.
 - Wider 780 × 680 popup and larger, wrapping titles.
+- Click an issue to read its full formatted description and discussion inside the mod.
+- Follow linked issues (including closed and cross-repository issues), then use Back
+  or Issues list to return without resetting list filters. Other links open the browser.
 - Start an installed coding agent in a Git worktree, selecting its model.
 - Minimal initial prompt: issue number/title, `gh issue view`, and branch name.
 - Existing PR CI badge/check notifications.
@@ -16,6 +19,30 @@ This is not the separate `git-d-herdr` terminal dashboard.
 Lists currently return up to 50 results per tab, filtered on GitHub first.
 "No milestone" means unassigned items, not all items. Select the **Issues**
 tab to view issues; **PRs** displays pull requests.
+
+## Reading issues
+
+Click an issue row to open a GitHub-like reader with its title, Open/Closed
+status, author, milestone, labels, formatted description and comments. GitHub
+renders the Markdown through its authenticated API, and Herdr displays it
+natively (not in a web browser). Task checkboxes are read-only text markers.
+An amber **Blocked · N** badge beside Open shows unresolved dependencies from
+GitHub's native "blocked by" relationships. Closed blockers do not contribute;
+mentions such as "Depends on #123" in prose alone do not create a dependency.
+
+Issue references such as `#123` and full issue links navigate within the reader,
+including closed issues and other repositories on the same GitHub host.
+**Back** retraces linked issues; **Issues list** returns directly to the filtered
+list. PR links and other external HTTPS links open the system browser.
+Use **Refresh** to reload the discussion; recent issues are cached in memory
+for one minute. No issue descriptions or comments are saved to this repository.
+
+**Start agent** is available only in the original repository, to avoid creating
+a worktree in the wrong checkout when following cross-repository links.
+This is a read-only reader, not an issue editor. Styling follows Herdr's native
+renderer: it is not a pixel-identical GitHub page, rich issue-title previews
+are not fetched, and some images/GitHub-specific formatting may require
+**Open in GitHub**. Same-page heading/comment anchors do not scroll to a target yet.
 
 ## Install on another Linux computer
 
@@ -69,7 +96,7 @@ Changes are **not uploaded automatically**:
 ```bash
 herdr-app check mods/github
 herdr-app check mods/issue-agent
-node --test tests/panel.test.mjs
+node --test tests/*.test.mjs
 git diff
 git add mods README.md tests
 git commit -m "feat: describe the change"
@@ -99,6 +126,8 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 
 - `mods/github/panel.js`: lists, filters, milestone picker, title rendering.
 - `mods/github/mod.json`: popup size.
+- `mods/github/issue-reader.js`: read-only native issue discussion and link handling.
+- `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.
 - `mods/issue-agent/main.js`: worktree creation, dialog, initial prompt.
 - `mods/issue-agent/agents.js`: agent-specific model/launch adapters.
 
