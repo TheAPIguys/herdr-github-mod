@@ -35,3 +35,44 @@ test('Clear removes the no-milestone filter too', () => {
   assert.equal(panel.filters.milestone, null);
   assert.equal(panel.hasFilters(), false);
 });
+
+test('rendering an issue after a worktree switch never refreshes or notifies', () => {
+  const panel = new Panel();
+  const rendered = {};
+  panel.context = 'previous worktree';
+  panel.reader = { nav: { current: {} }, render: () => rendered };
+  panel.refresh = () => assert.fail('Refresh must not run during render');
+  const cx = { notify: () => assert.fail('Notify must not run during render') };
+  assert.equal(panel.render(cx), rendered);
+});
+
+test('context changes refresh from the timer, not from render', () => {
+  let cwd = '/original';
+  const timers = new Map();
+  const input = { on() {} };
+  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', {
+    spaces: () => [{ active: true, folder: cwd, machine: null }],
+    focused: () => ({}),
+    panes: () => [],
+    InputState: { new: () => input },
+    IssueSessions: class { init() {} },
+  });
+  const panel = new TestPanel();
+  let refreshes = 0;
+  panel.listenCommands = () => {};
+  panel.refresh = () => {
+    ++refreshes;
+    panel.context = JSON.stringify({ cwd, on: null });
+  };
+  const cx = { timer: { every: (ms, callback) => timers.set(ms, callback) } };
+  panel.init({}, cx);
+  assert.equal(panel.tab, 'issues', 'New panels default to the Issues tab');
+  assert.equal(refreshes, 1);
+  timers.get(500)(cx);
+  assert.equal(refreshes, 1);
+  cwd = '/new-worktree';
+  timers.get(500)(cx);
+  assert.equal(refreshes, 2);
+  timers.get(500)(cx);
+  assert.equal(refreshes, 2);
+});

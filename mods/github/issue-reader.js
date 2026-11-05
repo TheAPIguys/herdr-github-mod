@@ -3,6 +3,7 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { exec, theme } from "herdr";
 import { openUrl } from "./open.js";
 import { issueTarget, issueApiArgs, readableIssueHtml, unresolvedBlockers, IssueNavigation } from "./issue-model.js";
+import { focusSession } from "./sessions.js";
 
 /** Read GitHub-rendered Markdown: GitHub resolves issue references, relative links and task lists. */
 async function api(args, source) {
@@ -13,7 +14,8 @@ async function api(args, source) {
 
 /** Render a read-only issue discussion while keeping navigation scoped to its original machine. */
 export class IssueReader {
-  constructor(source, root, launch) {
+  constructor(source, root, launch, sessions = () => []) {
+    this.sessions = sessions;
     this.source = source; this.root = root; this.launch = launch;
     this.nav = new IssueNavigation(async (target) => {
       const issue = await api(issueApiArgs(target), source);
@@ -73,6 +75,7 @@ export class IssueReader {
   render() {
     const t = theme(), nav = this.nav, target = nav.current;
     const issue = nav.data?.issue;
+    const sessions = this.sessions(target.url);
     const blockers = unresolvedBlockers(issue);
     const sameRepo = target.repository === this.root.repository;
     return v_flex().id("gh-issue-reader").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
@@ -95,6 +98,9 @@ export class IssueReader {
               .text_color(issue.state === "open" ? t.background : t.foreground).child(issue.state === "open" ? "◉ Open" : "✓ Closed"))
             .when(blockers > 0, (row) => row.child(div().id("gh-issue-blocked").px(10).py(5).rounded(12)
               .border_1().border_color(t.blocked).text_color(t.blocked).child(`⊘ Blocked · ${blockers}`)))
+            .when(sessions.length > 0, (row) => row.child(this.button("gh-issue-session",
+              `● Session open${sessions.length > 1 ? ` · ${sessions.length}` : ""}`, () => focusSession(sessions[0]), t)
+              .text_color("#f59e0b")))
             .when(Boolean(issue.milestone), (row) => row.child(div().text_color(t.muted).child(`Milestone: ${issue.milestone.title}`)))
             .children((issue.labels ?? []).map((label) => div().px(7).py(3).rounded(6).border_1().border_color(t.border).text_size(12).child(label.name)))
             .when(sameRepo, (row) => row.child(this.button("gh-issue-agent", "Start agent", () => this.launch({

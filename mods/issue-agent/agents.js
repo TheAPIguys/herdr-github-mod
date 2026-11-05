@@ -32,15 +32,24 @@ function piModels(out) {
     .map(([provider, model, , , thinking]) => ({ id: `${provider}/${model}`, efforts: thinking === "yes" ? PI_THINKING : [] }));
 }
 
-function lineModels(out) {
-  return out.split("\n").map((l) => l.trim()).filter((l) => /^\S+\/\S+$/.test(l)).map((id) => ({ id, efforts: [] }));
+async function opencodeModels(on, cwd) {
+  const endpoint = `/api/model?location[directory]=${encodeURIComponent(cwd)}&types=chat`;
+  const result = await exec("opencode", ["api", "get", endpoint], { cwd, on });
+  if (result.code !== 0) throw new Error((result.stderr || result.stdout || "Couldn't list OpenCode models.").trim());
+  const models = JSON.parse(result.stdout).data;
+  if (!Array.isArray(models)) throw new Error("OpenCode did not return a valid model list.");
+  return models.filter((m) => m.enabled !== false && m.type === "chat").map((m) => ({
+    id: `${m.providerID}/${m.id}`, label: m.name,
+    efforts: (m.variants ?? []).map((v) => v.id),
+  }));
 }
 
 /** Prepare a model-selected session without running a task, then open the full TUI. */
-async function opencodeFlags(model, _effort, cwd, on) {
+async function opencodeFlags(model, effort, cwd, on) {
   if (!model) return ["--prompt"];
   const slash = model.indexOf("/");
-  const [id, variant] = model.slice(slash + 1).split("#");
+  const [id, explicitVariant] = model.slice(slash + 1).split("#");
+  const variant = effort || explicitVariant;
   if (slash < 1 || !id) throw new Error("Choose an OpenCode model in provider/model format.");
   const body = { location: { directory: cwd }, model: { providerID: model.slice(0, slash), id, ...(variant ? { variant } : {}) } };
   const result = await exec("opencode", ["api", "post", "/api/session", "--data", JSON.stringify(body)], { cwd, on });
@@ -65,7 +74,7 @@ const ADAPTERS = {
     flags: (model) => (model ? ["--model", model] : []),
   },
   opencode: {
-    models: async (on) => lineModels(await run("opencode", ["models"], on)),
+    models: opencodeModels,
     flags: opencodeFlags,
   },
   cursor: {

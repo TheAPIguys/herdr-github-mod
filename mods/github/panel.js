@@ -5,6 +5,7 @@ import { summarizeChecks, checksIcon } from "./checks.js";
 import { openUrl } from "./open.js";
 import { IssueReader } from "./issue-reader.js";
 import { issueTarget } from "./issue-model.js";
+import { IssueSessions, focusSession } from "./sessions.js";
 
 const REFRESH_MS = 60000;
 const LIMIT = "50";
@@ -65,7 +66,9 @@ function listArgs(kind, filters) {
 // The PRs and issues panel (also the cmd-shift-g popup).
 export class Panel {
   init(_props, cx) {
-    this.tab = "prs"; this.items = { prs: [], issues: [] }; this.repoLabels = []; this.generation = 0;
+    this.sessions = new IssueSessions();
+    this.sessions.init(cx);
+    this.tab = "issues"; this.items = { prs: [], issues: [] }; this.repoLabels = []; this.generation = 0;
     this.repoMilestones = []; this.milestonesLoading = false; this.milestonesError = null;
     this.filters = { sort: SORTS[0], labels: new Set(), text: "", milestone: null };
     this.search = InputState.new({ placeholder: "Search, then Enter" });
@@ -73,6 +76,11 @@ export class Panel {
     this.search.on("change", (_e, cx) => { if (!this.search.value().trim() && this.filters.text) this.setText("", cx); });
     this.refresh(cx);
     cx.timer.every(REFRESH_MS, (cx) => this.refresh(cx));
+    // Worktree/space switches must refresh outside render: resetFor also closes
+    // the reader, and both operations notify Herdr that the view has changed.
+    cx.timer.every(500, (cx) => {
+      if (key() !== this.context) this.refresh(cx);
+    });
     this.listenCommands(cx);
   }
 
@@ -245,7 +253,8 @@ export class Panel {
   openIssue(item, cx) {
     const target = issueTarget(item.url, item.url);
     if (!target) return openUrl(item.url);
-    this.reader = new IssueReader(location(), target, (issue, source) => this.startAgent(issue, source));
+    this.reader = new IssueReader(location(), target, (issue, source) => this.startAgent(issue, source),
+      (url) => this.sessions.matches(url));
     this.reader.open(target, cx);
   }
 
@@ -257,6 +266,7 @@ export class Panel {
   }
 
   row(item, t) {
+    const sessions = this.tab === "issues" ? this.sessions.matches(item.url) : [];
     const meta = this.tab === "prs" ? this.prMeta(item, t) : this.issueMeta(item, t);
     const date = item[this.filters.sort.date] ?? item.updatedAt;
     return v_flex().id(`gh-${this.tab}-${item.number}`).flex_none().px(10).py(7).gap(3).rounded(7).cursor_pointer()
@@ -264,6 +274,10 @@ export class Panel {
         if (this.tab === "issues") this.openIssue(item, cx); else openUrl(item.url);
       })
       .child(h_flex().gap(8).items_center()
+        .when(sessions.length > 0, (e) => e.child(div().id(`gh-session-dot-${item.number}`).size(7).flex_none()
+          .rounded(4).bg("#f59e0b").cursor_pointer()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); focusSession(sessions[0]); })))
         .child(div().flex_none().text_size(11).text_color(t.accent).child(`#${item.number}`))
         .child(div().flex_1().min_w(0).whitespace_normal().text_size(14).child(item.title))
         .when(this.tab === "issues", (e) => e.child(this.agentButton(item, t))))
@@ -280,12 +294,13 @@ export class Panel {
   }
 
   render(cx) {
-    if (key() !== this.context) this.refresh(cx);
     if (this.reader?.nav.current) return this.reader.render();
     const t = theme(), list = this.items[this.tab];
     return v_flex().id("github").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
         .child(this.tabButton("prs", t)).child(this.tabButton("issues", t)).child(div().flex_1())
+        .when(this.tab === "issues" && list.some((item) => this.sessions.matches(item.url).length),
+          (e) => e.child(div().text_size(10).text_color("#f59e0b").child("● Session open")))
         .child(div().id("gh-refresh").px(8).h(26).flex().items_center().rounded(7).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx)).child(this.loading ? "…" : "Refresh")))
       .child(this.filterBar(t))

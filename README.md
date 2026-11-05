@@ -109,10 +109,28 @@ metadata is ignored.
 
 ## What this code accesses
 
+### Open issue sessions
+
+A small orange dot beside an issue number means a matching Herdr session is
+open. Click the dot, or the reader's **Session open** badge, to jump to it.
+The **Start agent** dialog also warns about existing sessions and offers
+**Go to session**, without preventing you from starting another.
+
+Matching uses an explicitly named `#123` tab or an issue branch such as
+`feat/123-description`, plus the checkout's GitHub repository URL. This works
+for existing worktrees and connected remote machines, not just new launches.
+Ambiguous identifiers and unknown repositories are not marked. Arbitrarily
+named tabs/branches without an issue number cannot be detected automatically.
+The dot means **open session**, including idle/completed agents, not proof
+that someone is actively working. Closed tabs no longer count. Discovery runs
+every two seconds; repository lookups are cached in memory for one minute.
+
 The panel runs authenticated `gh` commands to read repository issues, PRs,
 labels, milestones, and CI checks. The Agent action runs Git to create a
 worktree, may copy selected ignored files using `rsync`, and launches your
 chosen agent. The CI view can inspect the branches of open Herdr spaces.
+Session indicators read Herdr's open tabs/panes and use `gh repo view` in
+candidate checkout folders to verify repository identity.
 Browser links use `xdg-open`. No credentials or repository data are bundled.
 
 ## Restore the previous installation
@@ -130,6 +148,7 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 - `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.
 - `mods/issue-agent/main.js`: worktree creation, dialog, initial prompt.
 - `mods/issue-agent/agents.js`: agent-specific model/launch adapters.
+- `mods/{github,issue-agent}/sessions.js`: identical sandbox-local session matching helpers.
 
 This repository preserves the existing locally installed mods plus personal
 modifications. It is not an official Herdr release. No new license is asserted

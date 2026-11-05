@@ -5,9 +5,10 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { exec, run, props, closeOverlay, theme, knownAgents, home, readTextFile, shared, setShared } from "herdr";
 import { adapterFor } from "./agents.js";
+import { IssueSessions, focusSession } from "./sessions.js";
 
 const LAST_CHOICE = "issue-agent.last";
-const MODEL_CACHE = "issue-agent.models";
+const MODEL_CACHE = "issue-agent.models.v2";
 const CACHE_MS = 60 * 60 * 1000;
 const BRANCH_TYPES = { bug: "fix", documentation: "docs", docs: "docs", refactor: "refactor", chore: "chore" };
 
@@ -89,11 +90,11 @@ async function createWorktree(cwd, on, branch) {
   return path;
 }
 
-async function modelsFor(agent, on) {
+async function modelsFor(agent, on, cwd) {
   const cache = shared(MODEL_CACHE) ?? {};
-  const key = `${on ?? ""}:${agent.key}`;
+  const key = JSON.stringify([on ?? null, cwd, agent.key]);
   if (cache[key] && Date.now() - cache[key].at < CACHE_MS) return cache[key].models;
-  const models = await adapterFor(agent).models(on);
+  const models = await adapterFor(agent).models(on, cwd);
   setShared(MODEL_CACHE, { ...cache, [key]: { at: Date.now(), models } });
   return models;
 }
@@ -101,6 +102,8 @@ async function modelsFor(agent, on) {
 export default class IssueAgent extends View {
   init(_props, cx) {
     this.issue = props()?.issue ?? { number: 0, title: "Open this from an issue in the GitHub panel", labels: [] };
+    this.sessions = new IssueSessions();
+    this.sessions.init(cx);
     this.agents = []; this.models = []; this.filter = "";
     this.branchInput = InputState.new({ value: branchFor(this.issue), placeholder: "branch name" });
     this.filterInput = InputState.new({ placeholder: "filter or type a model" });
@@ -128,7 +131,7 @@ export default class IssueAgent extends View {
     this.loadingModels = true;
     cx.spawn(async (cx) => {
       try {
-        const models = await modelsFor(agent, props().on);
+        const models = await modelsFor(agent, props().on, props().cwd);
         if (this.agent !== agent) return;
         this.models = models;
         const remembered = last.agent === agent.key ? models.find((m) => m.id === last.model) : null;
@@ -214,7 +217,7 @@ export default class IssueAgent extends View {
 
   effortRow(t) {
     const efforts = this.model?.efforts ?? [];
-    if (!efforts.length) return div().text_color(t.dim).child(this.model ? "This model has no reasoning levels" : "Agent's default");
+    if (!efforts.length) return div().text_color(t.dim).child(this.model ? "This model has no variants / reasoning levels" : "Select a model to see its variants / reasoning levels");
     return h_flex().flex_wrap().gap(6).children(efforts.map((e) =>
       this.chip(`effort-${e}`, e, this.effort === e, () => { this.effort = this.effort === e ? null : e; }, t)));
   }
@@ -232,13 +235,19 @@ export default class IssueAgent extends View {
 
   render(cx) {
     const t = theme(), hasModels = this.agent && adapterFor(this.agent);
-    return v_flex().id("issue-agent").size_full().p(16).gap(14).bg(t.popover).text_color(t.foreground).text_size(12.5)
+    const sessions = this.sessions.matches(this.issue.url);
+    return v_flex().id("issue-agent").size_full().min_h(0).overflow_y_scrollbar().p(16).gap(14).bg(t.popover).text_color(t.foreground).text_size(12.5)
       .child(v_flex().gap(2)
         .child(div().text_size(14).font_semibold().child(`Start an agent on #${this.issue.number}`))
         .child(div().text_color(t.dim).truncate().child(this.issue.title)))
       .child(this.section("Branch", this.field(this.branchInput, t), t))
+      .when(sessions.length > 0, (e) => e.child(v_flex().gap(6)
+        .child(div().text_color("#f59e0b").child("● Session already open for this issue. You can still start another."))
+        .child(this.chip("existing-session", "Go to session", false, () => {
+          focusSession(sessions[0]); closeOverlay(props().overlay);
+        }, t))))
       .child(this.section("Agent", this.agentRow(t), t))
-      .when(Boolean(hasModels), (e) => e.child(this.section("Model", this.modelList(t), t)).child(this.section("Reasoning", this.effortRow(t), t)))
+      .when(Boolean(hasModels), (e) => e.child(this.section("Model", this.modelList(t), t)).child(this.section("Variant / Reasoning", this.effortRow(t), t)))
       .child(div().flex_1())
       .child(this.footer(t));
   }
