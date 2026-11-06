@@ -13,7 +13,9 @@ This is not the separate `git-d-herdr` terminal dashboard.
 - Follow linked issues (including closed and cross-repository issues), then use Back
   or Issues list to return without resetting list filters. Other links open the browser.
 - Start an installed coding agent in a Git worktree, selecting its model.
-- Minimal initial prompt: issue number/title, `gh issue view`, and branch name.
+- Editable initial message template with `{issue#}`, `{title}`, `{branch}`,
+  `{url}`, and `{repo}` placeholders, saved per repository and machine in
+  Herdr's local state.
 - Existing PR CI badge/check notifications.
 
 Lists currently return up to 50 results per tab, filtered on GitHub first.
@@ -38,8 +40,11 @@ Use **Refresh** to reload the discussion; recent issues are cached in memory
 for one minute. No issue descriptions or comments are saved to this repository.
 
 **Start agent** is available only in the original repository, to avoid creating
-a worktree in the wrong checkout when following cross-repository links.
-This is a read-only reader, not an issue editor. Styling follows Herdr's native
+a worktree in the wrong checkout when following cross-repository links. The
+dialog's **Initial message** can be edited and is saved for that GitHub
+repository and machine in Herdr's local `shared` state
+(`~/.config/herdr-app/shared.json`). **Reset** restores the built-in default.
+The reader itself is read-only. Styling follows Herdr's native
 renderer: it is not a pixel-identical GitHub page, rich issue-title previews
 are not fetched, and some images/GitHub-specific formatting may require
 **Open in GitHub**. Same-page heading/comment anchors do not scroll to a target yet.

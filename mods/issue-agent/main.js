@@ -1,15 +1,17 @@
-// Start an agent on a GitHub issue: props { issue: {number, title, labels}, cwd, on }.
+// Start an agent on a GitHub issue: props { issue: {number, title, labels, url}, cwd, on }.
 // Makes a Herdr-style worktree from the current HEAD, with optional .worktreeinclude files.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, run, props, closeOverlay, theme, knownAgents, home, readTextFile, shared, setShared } from "herdr";
 import { adapterFor } from "./agents.js";
-import { IssueSessions, focusSession } from "./sessions.js";
+import { IssueSessions, focusSession, issueKey } from "./sessions.js";
 
 const LAST_CHOICE = "issue-agent.last";
 const MODEL_CACHE = "issue-agent.models.v2";
+const TEMPLATES = "issue-agent.templates.v1";
 const CACHE_MS = 60 * 60 * 1000;
+const DEFAULT_TASK_TEMPLATE = "Work on GitHub issue #{issue#}: {title}. Read it with `gh issue view {issue#}`. You are in a fresh worktree on branch {branch}.";
 const BRANCH_TYPES = { bug: "fix", documentation: "docs", docs: "docs", refactor: "refactor", chore: "chore" };
 
 const slug = (text) => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
@@ -21,11 +23,37 @@ function branchFor(issue) {
   return `${type}/${issue.number}-${slug(issue.title)}`;
 }
 
-function taskFor(issue, branch) {
-  return [
-    `Work on GitHub issue #${issue.number}: ${issue.title}. Read it with \`gh issue view ${issue.number}\`.`,
-    `You are in a fresh worktree on branch ${branch}.`,
-  ].join(" ");
+/** Repository and machine scope for a saved initial message. */
+function templateKey(issue, cwd, on) {
+  const key = issueKey(issue.url);
+  const repo = key ? key.slice(0, key.lastIndexOf("/")) : `folder:${cwd ?? ""}`;
+  return `${on == null ? "local" : `machine:${on}`}|${repo}`;
+}
+
+function templateFor(templates, key) {
+  const value = templates && typeof templates === "object" ? templates[key] : null;
+  return typeof value === "string" && value.trim() ? value : DEFAULT_TASK_TEMPLATE;
+}
+
+function withTemplate(templates, key, value) {
+  const next = { ...(templates && typeof templates === "object" ? templates : {}) };
+  const text = typeof value === "string" ? value : "";
+  if (!text.trim() || text === DEFAULT_TASK_TEMPLATE) delete next[key];
+  else next[key] = text;
+  return next;
+}
+
+function renderTask(template, issue, branch) {
+  const key = issueKey(issue.url);
+  const values = {
+    "issue#": String(issue.number ?? ""),
+    title: issue.title ?? "",
+    branch,
+    url: issue.url ?? "",
+    repo: key ? key.split("/").slice(1, 3).join("/") : "",
+  };
+  return (typeof template === "string" && template.trim() ? template : DEFAULT_TASK_TEMPLATE)
+    .replace(/\{(issue#|title|branch|url|repo)\}/g, (_match, name) => values[name]);
 }
 
 async function git(cwd, args, on) {
@@ -101,7 +129,13 @@ async function modelsFor(agent, on, cwd) {
 
 export default class IssueAgent extends View {
   init(_props, cx) {
-    this.issue = props()?.issue ?? { number: 0, title: "Open this from an issue in the GitHub panel", labels: [] };
+    const p = props() ?? {};
+    this.issue = p.issue ?? { number: 0, title: "Open this from an issue in the GitHub panel", labels: [] };
+    this.templateKey = templateKey(this.issue, p.cwd, p.on);
+    this.messageInput = TextareaState.new({
+      value: templateFor(shared(TEMPLATES), this.templateKey), rows: 3,
+    });
+    this.messageInput.on("blur", () => this.saveTemplate());
     this.sessions = new IssueSessions();
     this.sessions.init(cx);
     this.agents = []; this.models = []; this.filter = "";
@@ -154,10 +188,17 @@ export default class IssueAgent extends View {
     return this.filter && !this.models.some((m) => m.id === this.filter) ? this.filter : null;
   }
 
+  saveTemplate() {
+    const current = shared(TEMPLATES);
+    const next = withTemplate(current, this.templateKey, this.messageInput.value());
+    if (JSON.stringify(next) !== JSON.stringify(current)) setShared(TEMPLATES, next);
+  }
+
   start(cx) {
     const branch = this.branchInput.value().trim();
     if (this.busy || !this.agent || !branch || !this.issue.number) return;
     const { cwd, on } = props(), agent = this.agent, model = this.chosenModelId(), effort = this.effort;
+    this.saveTemplate();
     this.busy = true; this.error = null;
     cx.spawn(async (cx) => {
       try {
@@ -165,7 +206,7 @@ export default class IssueAgent extends View {
         const flags = await adapterFor(agent)?.flags(model, effort, folder, on) ?? [];
         const argv = [...agent.run, ...flags];
         setShared(LAST_CHOICE, { agent: agent.key, model, effort });
-        run("space.new", { folder, machine: on, tab: `#${this.issue.number}`, argv, task: taskFor(this.issue, branch) });
+        run("space.new", { folder, machine: on, tab: `#${this.issue.number}`, argv, task: renderTask(this.messageInput.value(), this.issue, branch) });
         closeOverlay(props().overlay);
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.busy = false; cx.notify(); }
@@ -175,6 +216,19 @@ export default class IssueAgent extends View {
 
   section(title, child, t) {
     return v_flex().gap(6).child(div().text_size(11).text_color(t.dim).child(title)).child(child);
+  }
+
+  messageSection(t) {
+    return v_flex().gap(6)
+      .child(h_flex().items_center().gap(8)
+        .child(div().text_size(11).text_color(t.dim).child("Initial message"))
+        .child(div().flex_1())
+        .child(this.chip("reset-message", "Reset", false, () => {
+          this.messageInput.set_value(DEFAULT_TASK_TEMPLATE);
+          this.saveTemplate();
+        }, t)))
+      .child(this.textarea(this.messageInput, t))
+      .child(div().text_size(10).text_color(t.dim).child("Placeholders: {issue#} · {title} · {branch} · {url} · {repo}"));
   }
 
   chip(id, label, selected, onClick, t, icon = null) {
@@ -187,6 +241,11 @@ export default class IssueAgent extends View {
   field(state, t) {
     return div().h(30).px(10).flex().items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
       .child(Input.new(state).h_full().text_size(12).text_color(t.foreground));
+  }
+
+  textarea(state, t) {
+    return div().px(10).py(8).rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(Textarea.new(state).w_full().h(84).text_size(12).text_color(t.foreground));
   }
 
   agentIcon(a, t) {
@@ -241,6 +300,7 @@ export default class IssueAgent extends View {
         .child(div().text_size(14).font_semibold().child(`Start an agent on #${this.issue.number}`))
         .child(div().text_color(t.dim).truncate().child(this.issue.title)))
       .child(this.section("Branch", this.field(this.branchInput, t), t))
+      .child(this.messageSection(t))
       .when(sessions.length > 0, (e) => e.child(v_flex().gap(6)
         .child(div().text_color("#f59e0b").child("● Session already open for this issue. You can still start another."))
         .child(this.chip("existing-session", "Go to session", false, () => {

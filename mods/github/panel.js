@@ -246,7 +246,7 @@ export class Panel {
 
   startAgent(issue, source = location()) {
     const { cwd, on } = source;
-    openOverlay({ mod: "issue-agent", kind: "dialog", width: 480, height: 620, props: { issue, cwd, on } });
+    openOverlay({ mod: "issue-agent", kind: "dialog", width: 480, height: 740, props: { issue, cwd, on } });
   }
 
   /** Open issues in-app; the original checkout remains the worktree/agent launch context. */
