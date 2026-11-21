@@ -6,6 +6,11 @@ This is not the separate `git-d-herdr` terminal dashboard.
 ## Features
 
 - Open issues and pull requests, search, label filters, and sorting.
+- Search as you type: fuzzy local matching on number, title, author, labels,
+  milestone, and branch; a short pause then searches GitHub for results beyond
+  the loaded page.
+- A lone `#123` looks up that issue or PR directly, including closed items not
+  shown in the open list. Enter opens it.
 - Milestone filter: all milestones, one named milestone, or no milestone.
   Closed milestones are available too; lists show **open** issues/PRs only.
 - Wider 780 × 680 popup and larger, wrapping titles.
@@ -21,6 +26,21 @@ This is not the separate `git-d-herdr` terminal dashboard.
 Lists currently return up to 50 results per tab, filtered on GitHub first.
 "No milestone" means unassigned items, not all items. Select the **Issues**
 tab to view issues; **PRs** displays pull requests.
+
+## Search
+
+Typing filters the loaded rows immediately. Matching is fuzzy and covers the
+issue/PR number, title, author, labels, milestone, and branch, so terms can be
+in any order and small typos still match (`isue` finds `issue`). After a short
+pause the same text is sent to GitHub search, which reaches items outside the
+50 loaded rows; body-only matches stay after the title/label matches. Press
+Enter to search immediately. While a query is active, rows are ordered by
+match relevance rather than the date sort.
+
+A lone `#123` is a number lookup instead of a text search. The current tab
+shows that issue or PR, fetching it even when it is closed or outside the
+loaded page; Enter opens it. Other rows and the session dot still behave as
+described below.
 
 ## Reading issues
 
@@ -148,6 +168,7 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 ## Files
 
 - `mods/github/panel.js`: lists, filters, milestone picker, title rendering.
+- `mods/github/search.js`: `#number` parsing, fuzzy scoring, and result ranking.
 - `mods/github/mod.json`: popup size.
 - `mods/github/issue-reader.js`: read-only native issue discussion and link handling.
 - `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.

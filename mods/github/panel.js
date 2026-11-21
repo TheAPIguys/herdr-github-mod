@@ -6,12 +6,25 @@ import { openUrl } from "./open.js";
 import { IssueReader } from "./issue-reader.js";
 import { issueTarget } from "./issue-model.js";
 import { IssueSessions, focusSession } from "./sessions.js";
+import { parseSearch, rankItems, rankSearchResults } from "./search.js";
 
 const REFRESH_MS = 60000;
+const SEARCH_DEBOUNCE_MS = 350;
+const NUMBER_CACHE_MS = 60000;
 const LIMIT = "50";
 const KINDS = {
-  prs: { label: "PRs", args: ["pr", "list", "--state", "open", "--limit", LIMIT, "--json", "number,title,author,url,isDraft,createdAt,updatedAt,reviewDecision,headRefName,labels,statusCheckRollup"] },
-  issues: { label: "Issues", args: ["issue", "list", "--state", "open", "--limit", LIMIT, "--json", "number,title,author,url,labels,milestone,createdAt,updatedAt"] },
+  prs: {
+    label: "PRs",
+    fields: "number,title,author,url,isDraft,createdAt,updatedAt,reviewDecision,headRefName,labels,statusCheckRollup,state",
+    args: ["pr", "list", "--state", "open", "--limit", LIMIT, "--json",
+      "number,title,author,url,isDraft,createdAt,updatedAt,reviewDecision,headRefName,labels,statusCheckRollup,state"],
+  },
+  issues: {
+    label: "Issues",
+    fields: "number,title,author,url,labels,milestone,createdAt,updatedAt,state",
+    args: ["issue", "list", "--state", "open", "--limit", LIMIT, "--json",
+      "number,title,author,url,labels,milestone,createdAt,updatedAt,state"],
+  },
 };
 // Sorted by GitHub's search, so "Oldest" reaches past the newest 50.
 const SORTS = [
@@ -36,6 +49,8 @@ function ago(iso) {
 }
 
 function reviewBadge(pr, t) {
+  if (pr.state === "MERGED") return { text: "merged", color: t.ansi5 };
+  if (pr.state === "CLOSED") return { text: "closed", color: t.ansi1 };
   if (pr.isDraft) return { text: "draft", color: t.dim };
   if (pr.reviewDecision === "APPROVED") return { text: "approved", color: t.ansi2 };
   if (pr.reviewDecision === "CHANGES_REQUESTED") return { text: "changes", color: t.ansi1 };
@@ -63,6 +78,11 @@ function listArgs(kind, filters) {
   return [...KINDS[kind].args, "--search", search, ...[...filters.labels].flatMap((l) => ["--label", l])];
 }
 
+/** Read one issue/PR by number, including closed items the list does not show. */
+function viewArgs(kind, number) {
+  return [KINDS[kind].args[0], "view", String(number), "--json", KINDS[kind].fields];
+}
+
 // The PRs and issues panel (also the cmd-shift-g popup).
 export class Panel {
   init(_props, cx) {
@@ -71,9 +91,14 @@ export class Panel {
     this.tab = "issues"; this.items = { prs: [], issues: [] }; this.repoLabels = []; this.generation = 0;
     this.repoMilestones = []; this.milestonesLoading = false; this.milestonesError = null;
     this.filters = { sort: SORTS[0], labels: new Set(), text: "", milestone: null };
-    this.search = InputState.new({ placeholder: "Search, then Enter" });
-    this.search.on("submit", (_e, cx) => this.setText(this.search.value().trim(), cx));
-    this.search.on("change", (_e, cx) => { if (!this.search.value().trim() && this.filters.text) this.setText("", cx); });
+    // `query` follows every keystroke for instant local filtering; `filters.text`
+    // is the debounced GitHub search that reaches beyond the loaded page.
+    this.query = ""; this.itemsQuery = null; this.searchTimer = null;
+    this.numberCache = new Map(); this.numberPending = new Map();
+    this.numberLoading = null; this.numberError = null;
+    this.search = InputState.new({ placeholder: "Search, or #123" });
+    this.search.on("submit", (_e, cx) => this.submitSearch(cx));
+    this.search.on("change", (_e, cx) => this.searchChanged(cx));
     this.refresh(cx);
     cx.timer.every(REFRESH_MS, (cx) => this.refresh(cx));
     // Worktree/space switches must refresh outside render: resetFor also closes
@@ -88,7 +113,7 @@ export class Panel {
     cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();
-        if (command in KINDS) this.tab = command;
+        if (command in KINDS) this.setTab(command, cx);
         if (command === "refresh") this.refresh(cx);
         if (command === "sort") this.cycleSort(cx);
         if (command === "labels") this.showLabels = !this.showLabels;
@@ -106,7 +131,11 @@ export class Panel {
     cx.spawn(async (cx) => {
       try {
         const [prs, issues] = await Promise.all(["prs", "issues"].map((kind) => gh(listArgs(kind, filters), cwd, on)));
-        if (generation === this.generation) { this.items = { prs, issues }; this.error = null; }
+        if (generation === this.generation) {
+          this.items = { prs, issues };
+          this.itemsQuery = filters.text;
+          this.error = null;
+        }
       } catch (e) { if (generation === this.generation) this.error = String(e.message ?? e); }
       finally { if (generation === this.generation) this.loading = false; cx.notify(); }
     });
@@ -116,10 +145,15 @@ export class Panel {
   // A new repo: drop repository-specific filters and load its labels and milestones.
   resetFor(context, cwd, on, cx) {
     if (this.reader) { this.reader.nav.close(); this.reader = null; }
-    this.context = context; this.items = { prs: [], issues: [] }; this.error = null; this.repoLabels = [];
+    this.cancelSearch();
+    this.context = context; this.items = { prs: [], issues: [] }; this.itemsQuery = null; this.error = null; this.repoLabels = [];
     this.filters = { ...this.filters, labels: new Set(), milestone: null };
+    this.numberCache.clear(); this.numberPending.clear();
+    this.numberLoading = null; this.numberError = null;
     this.repoMilestones = []; this.milestonesError = null; this.milestonesLoading = Boolean(cwd);
     if (!cwd) return;
+    const number = parseSearch(this.query).number;
+    if (number !== null) cx.spawn((taskCx) => this.ensureNumber(number, taskCx));
     cx.spawn(async (cx) => {
       try {
         const labels = await gh(["label", "list", "--limit", "200", "--json", "name,color"], cwd, on);
@@ -150,6 +184,118 @@ export class Panel {
     if (text !== this.filters.text) this.setFilters({ text }, cx);
   }
 
+  cancelSearch() {
+    if (this.searchTimer) { this.searchTimer.cancel(); this.searchTimer = null; }
+  }
+
+  /** Every keystroke filters the loaded page immediately; GitHub runs after a pause. */
+  searchChanged(cx) {
+    const value = this.search.value().trim();
+    this.query = value;
+    this.numberError = null;
+    this.cancelSearch();
+    const parsed = parseSearch(value);
+    if (parsed.number !== null) {
+      // A number is a lookup, not a text search: keep the loaded list broad.
+      if (this.filters.text) this.setFilters({ text: "" }, cx); else cx.notify();
+      this.searchTimer = cx.timer.after(SEARCH_DEBOUNCE_MS, (timerCx) => {
+        this.searchTimer = null;
+        if (parseSearch(this.search.value()).number === parsed.number) this.ensureNumber(parsed.number, timerCx);
+      });
+      return;
+    }
+    if (!value) {
+      if (this.filters.text) this.setText("", cx); else cx.notify();
+      return;
+    }
+    if (value === this.filters.text) { cx.notify(); return; }
+    cx.notify();
+    this.searchTimer = cx.timer.after(SEARCH_DEBOUNCE_MS, (timerCx) => {
+      this.searchTimer = null;
+      if (this.search.value().trim() === value) this.setText(value, timerCx);
+    });
+  }
+
+  /** Enter commits the GitHub search now; for `#123`, open the issue or PR. */
+  submitSearch(cx) {
+    this.cancelSearch();
+    const value = this.search.value().trim();
+    this.query = value;
+    const parsed = parseSearch(value);
+    if (parsed.number !== null) {
+      cx.notify();
+      this.openNumber(parsed.number, cx);
+      return;
+    }
+    this.setText(parsed.text, cx);
+  }
+
+  numberItem(kind, number) {
+    const cached = this.numberCache.get(`${kind}:${number}`);
+    return this.items[kind].find((item) => item.number === number)
+      ?? (cached && Date.now() - cached.at < NUMBER_CACHE_MS ? cached.item : null);
+  }
+
+  /** Fetch a number the open list does not contain, including closed items. */
+  lookupNumber(kind, number, cx) {
+    const id = `${kind}:${number}`, cached = this.numberCache.get(id);
+    if (cached && Date.now() - cached.at < NUMBER_CACHE_MS) return Promise.resolve(cached.item);
+    const pending = this.numberPending.get(id);
+    if (pending) return pending;
+    const { cwd, on } = location(), context = this.context;
+    this.numberLoading = id; this.numberError = null;
+    let request;
+    request = (async () => {
+      try {
+        const item = await gh(viewArgs(kind, number), cwd, on);
+        if (context === this.context) {
+          this.numberCache.set(id, { item, at: Date.now() });
+          if (this.numberCache.size > 20) this.numberCache.delete(this.numberCache.keys().next().value);
+        }
+        return item;
+      } catch (e) {
+        if (context === this.context) this.numberError = { id, message: String(e.message ?? e) };
+        return null;
+      } finally {
+        if (this.numberPending.get(id) === request) this.numberPending.delete(id);
+        if (this.numberLoading === id) this.numberLoading = null;
+        if (context === this.context) cx.notify();
+      }
+    })();
+    this.numberPending.set(id, request);
+    cx.notify();
+    return request;
+  }
+
+  ensureNumber(number, cx) {
+    if (this.numberItem(this.tab, number)) { cx.notify(); return; }
+    this.lookupNumber(this.tab, number, cx);
+  }
+
+  openNumber(number, cx) {
+    const kind = this.tab, context = this.context, local = this.numberItem(kind, number);
+    if (local) {
+      if (kind === "issues") this.openIssue(local, cx); else openUrl(local.url);
+      return;
+    }
+    cx.spawn(async (taskCx) => {
+      const item = await this.lookupNumber(kind, number, taskCx);
+      if (!item || context !== this.context || parseSearch(this.search.value()).number !== number) return;
+      if (kind === "issues") this.openIssue(item, taskCx); else openUrl(item.url);
+    });
+  }
+
+  /** Local matches appear while typing; committed GitHub results keep body-only matches. */
+  visibleItems() {
+    const parsed = parseSearch(this.query), items = this.items[this.tab];
+    if (parsed.number !== null) {
+      const item = this.numberItem(this.tab, parsed.number);
+      return item ? [item] : [];
+    }
+    if (!parsed.text) return items;
+    return this.itemsQuery === parsed.text ? rankSearchResults(items, parsed.text) : rankItems(items, parsed.text);
+  }
+
   cycleSort(cx) {
     const next = SORTS[(SORTS.indexOf(this.filters.sort) + 1) % SORTS.length];
     this.setFilters({ sort: next }, cx);
@@ -162,19 +308,30 @@ export class Panel {
   }
 
   clearFilters(cx) {
-    this.search.set_value("");
+    this.cancelSearch();
+    this.query = ""; this.numberError = null;
     this.setFilters({ sort: SORTS[0], labels: new Set(), text: "", milestone: null }, cx);
+    this.search.set_value("");
   }
 
   hasFilters() {
-    return this.filters.sort !== SORTS[0] || this.filters.labels.size > 0 || Boolean(this.filters.text) || this.filters.milestone !== null;
+    return Boolean(this.query) || this.filters.sort !== SORTS[0] || this.filters.labels.size > 0
+      || Boolean(this.filters.text) || this.filters.milestone !== null;
+  }
+
+  /** Keep reading the same number in the other tab, where it may also exist. */
+  setTab(kind, cx) {
+    this.tab = kind;
+    cx.notify();
+    const number = parseSearch(this.query).number;
+    if (number !== null) cx.spawn((taskCx) => this.ensureNumber(number, taskCx));
   }
 
   tabButton(kind, t) {
-    const active = this.tab === kind, count = this.items[kind].length;
+    const active = this.tab === kind, count = active ? this.visibleItems().length : this.items[kind].length;
     return h_flex().id(`gh-tab-${kind}`).h(26).px(10).gap(6).items_center().rounded(7).cursor_pointer()
       .when(active, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { this.tab = kind; cx.notify(); })
+      .on_click((_e, cx) => this.setTab(kind, cx))
       .child(div().text_color(active ? t.foreground : t.muted).child(KINDS[kind].label))
       .child(div().text_size(10).text_color(t.dim).child(String(count)));
   }
@@ -194,7 +351,7 @@ export class Panel {
       .child(this.filterChip("gh-milestones", "Milestones", this.filters.milestone !== null || this.showMilestones,
         (cx) => { this.showMilestones = !this.showMilestones; cx.notify(); }, t))
       .child(div().flex_1().min_w(0).h(24).px(8).flex().items_center().rounded(6).border_1()
-        .border_color(this.filters.text ? t.accent : t.border).bg(t.background)
+        .border_color(this.query ? t.accent : t.border).bg(t.background)
         .child(Input.new(this.search).h_full().text_size(11).text_color(t.foreground)))
       .when(this.hasFilters(), (e) => e.child(this.filterChip("gh-clear", "Clear", false, (cx) => this.clearFilters(cx), t)));
   }
@@ -241,7 +398,8 @@ export class Panel {
 
   issueMeta(issue, t) {
     return h_flex().gap(6).text_size(11).text_color(t.dim).min_w(0).overflow_hidden()
-      .children(issue.labels.slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)));
+      .children(issue.labels.slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)))
+      .when(issue.state && issue.state !== "OPEN", (e) => e.child(div().text_color(t.muted).child(issue.state.toLowerCase())));
   }
 
   startAgent(issue, source = location()) {
@@ -288,14 +446,26 @@ export class Panel {
 
   emptyText() {
     if (this.error) return this.error;
+    const parsed = parseSearch(this.query);
+    if (parsed.number !== null) {
+      const id = `${this.tab}:${parsed.number}`;
+      if (this.numberLoading === id || this.searchTimer) return `Looking up #${parsed.number}…`;
+      if (this.numberError?.id === id) return this.numberError.message;
+      if (this.loading) return "Loading…";
+      return `No open ${this.tab === "prs" ? "PR" : "issue"} #${parsed.number}`;
+    }
     if (this.loading) return "Loading…";
     const what = this.tab === "prs" ? "pull requests" : "issues";
+    if (parsed.text) {
+      if (parsed.text !== this.filters.text) return `Searching for “${parsed.text}”…`;
+      return `No open ${what} match “${parsed.text}”`;
+    }
     return this.hasFilters() ? `No open ${what} match these filters` : `No open ${what}`;
   }
 
   render(cx) {
     if (this.reader?.nav.current) return this.reader.render();
-    const t = theme(), list = this.items[this.tab];
+    const t = theme(), list = this.visibleItems();
     return v_flex().id("github").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
         .child(this.tabButton("prs", t)).child(this.tabButton("issues", t)).child(div().flex_1())

@@ -7,7 +7,22 @@ import test from 'node:test';
 const source = fs.readFileSync(new URL('../mods/github/panel.js', import.meta.url), 'utf8')
   .replace(/^import .*;\n/gm, '').replace('export class Panel', 'class Panel');
 const { listArgs, Panel, SORTS } = vm.runInNewContext(source + '\n;({listArgs, Panel, SORTS})');
+const searchSource = fs.readFileSync(new URL('../mods/github/search.js', import.meta.url), 'utf8').replace(/^export /gm, '');
+const search = vm.runInNewContext(searchSource + '\n;({parseSearch, rankItems, rankSearchResults})');
 const base = { sort: SORTS[0], labels: new Set(['bug']), text: 'login', milestone: null };
+const sample = [
+  { number: 12, title: 'Fix login crash', author: { login: 'ada' }, labels: [] },
+  { number: 34, title: 'Refactor logout flow', author: { login: 'bob' }, labels: [] },
+  { number: 56, title: 'Document login settings', author: { login: 'carol' }, labels: [] },
+];
+function searchPanel() {
+  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', { ...search });
+  const panel = new TestPanel();
+  panel.items = { issues: sample, prs: [] };
+  panel.numberCache = new Map(); panel.numberPending = new Map();
+  panel.tab = 'issues'; panel.query = ''; panel.itemsQuery = '';
+  return panel;
+}
 
 for (const kind of ['prs', 'issues']) {
   test(`${kind}: milestone queries preserve other filters`, () => {
@@ -51,6 +66,7 @@ test('context changes refresh from the timer, not from render', () => {
   const timers = new Map();
   const input = { on() {} };
   const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', {
+    ...search,
     spaces: () => [{ active: true, folder: cwd, machine: null }],
     focused: () => ({}),
     panes: () => [],
@@ -75,4 +91,74 @@ test('context changes refresh from the timer, not from render', () => {
   assert.equal(refreshes, 2);
   timers.get(500)(cx);
   assert.equal(refreshes, 2);
+});
+
+test('typing filters the loaded page immediately, and a number selects one row', () => {
+  const panel = searchPanel(), rows = () => Array.from(panel.visibleItems(), (item) => item.number);
+  assert.equal(JSON.stringify(panel.visibleItems()), JSON.stringify(sample), 'an empty query leaves the list untouched');
+  panel.query = 'login';
+  panel.itemsQuery = null;
+  assert.equal(JSON.stringify(rows()), JSON.stringify([12, 56]));
+  panel.query = '#34';
+  assert.equal(JSON.stringify(rows()), JSON.stringify([34]));
+  panel.query = '#999';
+  assert.equal(panel.visibleItems().length, 0);
+});
+
+test('committed GitHub searches keep body-only results after fuzzy matches', () => {
+  const panel = searchPanel();
+  panel.query = 'startup';
+  panel.itemsQuery = null;
+  assert.equal(panel.visibleItems().length, 0, 'old results are not claimed as matches while typing');
+  panel.itemsQuery = 'startup';
+  assert.equal(JSON.stringify(Array.from(panel.visibleItems(), (item) => item.number)), JSON.stringify([12, 34, 56]));
+});
+
+test('Enter on #number opens that issue', () => {
+  const panel = searchPanel();
+  const opened = [];
+  panel.openIssue = (item) => opened.push(item.number);
+  panel.search = { value: () => '#56' };
+  panel.submitSearch({ notify() {} });
+  assert.deepEqual(opened, [56]);
+});
+
+test('an uncommitted query still shows the Clear control', () => {
+  const panel = searchPanel();
+  panel.filters = { ...base, text: '', labels: new Set(), milestone: null };
+  panel.query = 'log';
+  assert.equal(panel.hasFilters(), true);
+});
+
+test('typing schedules one debounced GitHub search, and #number a direct lookup', () => {
+  const panel = searchPanel();
+  panel.filters = { ...base, text: '', labels: new Set(), milestone: null };
+  const tasks = [];
+  const cx = {
+    notify() {},
+    timer: { after(ms, callback) {
+      const task = { ms, callback, cancel() { task.cancelled = true; } };
+      tasks.push(task);
+      return task;
+    } },
+  };
+  panel.search = { value: () => 'log' };
+  panel.setText = (text) => { panel.filters.text = text; };
+  panel.searchChanged(cx);
+  assert.equal(panel.query, 'log');
+  assert.equal(tasks[0].ms, 350);
+  panel.search = { value: () => 'logi' };
+  panel.searchChanged(cx);
+  assert.equal(tasks[0].cancelled, true, 'a new keystroke cancels the pending search');
+  tasks[1].callback(cx);
+  assert.equal(panel.filters.text, 'logi');
+
+  const looked = [];
+  panel.filters.text = '';
+  panel.ensureNumber = (number) => looked.push(number);
+  panel.search = { value: () => '#234' };
+  panel.searchChanged(cx);
+  assert.equal(tasks.length, 3);
+  tasks[2].callback(cx);
+  assert.equal(JSON.stringify(looked), JSON.stringify([234]));
 });
