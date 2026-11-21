@@ -1,6 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, theme, nextCommand, openOverlay } from "herdr";
+import { spaces, panes, focused, exec, theme, nextCommand, openOverlay, shared, setShared } from "herdr";
+import { listKey, readList, readMeta, writeList, writeMeta } from "./cache.js";
 import { summarizeChecks, checksIcon } from "./checks.js";
 import { groupIssues, groupLabel, subIssueCountLabel } from "./group.js";
 import { openUrl } from "./open.js";
@@ -12,6 +13,9 @@ import { parseSearch, rankItems, rankSearchResults } from "./search.js";
 const REFRESH_MS = 60000;
 const SEARCH_DEBOUNCE_MS = 350;
 const NUMBER_CACHE_MS = 60000;
+const LIST_TTL_MS = 60000;
+const META_TTL_MS = 10 * 60 * 1000;
+const CACHE_KEY = "github.cache.v1";
 const LIMIT = "50";
 const KINDS = {
   prs: {
@@ -22,9 +26,9 @@ const KINDS = {
   },
   issues: {
     label: "Issues",
-    fields: "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssues,subIssuesSummary",
+    fields: "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssuesSummary",
     args: ["issue", "list", "--state", "open", "--limit", LIMIT, "--json",
-      "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssues,subIssuesSummary"],
+      "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssuesSummary"],
   },
 };
 // Sorted by GitHub's search, so "Oldest" reaches past the newest 50.
@@ -91,6 +95,7 @@ export class Panel {
     this.sessions.init(cx);
     this.tab = "issues"; this.items = { prs: [], issues: [] }; this.repoLabels = []; this.generation = 0;
     this.groupSubIssues = true; this.collapsed = new Set();
+    this.loadingKinds = new Set(); this.errors = { prs: null, issues: null };
     this.repoMilestones = []; this.milestonesLoading = false; this.milestonesError = null;
     this.filters = { sort: SORTS[0], labels: new Set(), text: "", milestone: null };
     // `query` follows every keystroke for instant local filtering; `filters.text`
@@ -116,7 +121,7 @@ export class Panel {
       for (;;) {
         const command = await nextCommand();
         if (command in KINDS) this.setTab(command, cx);
-        if (command === "refresh") this.refresh(cx);
+        if (command === "refresh") this.refresh(cx, true);
         if (command === "sort") this.cycleSort(cx);
         if (command === "labels") this.showLabels = !this.showLabels;
         cx.notify();
@@ -124,51 +129,98 @@ export class Panel {
     });
   }
 
-  refresh(cx) {
+  isLoading(kind = this.tab) {
+    return Boolean(this.loadingKinds?.has(kind));
+  }
+
+  saveList(kind, context, filters, items) {
+    setShared(CACHE_KEY, writeList(shared(CACHE_KEY), listKey(context, filters), kind, items, filters.text));
+  }
+
+  /** Show the last device cache immediately, then refresh only stale tabs. */
+  refresh(cx, force = false) {
     const { cwd, on } = location(), context = key();
     if (context !== this.context) this.resetFor(context, cwd, on, cx);
     if (!cwd) return;
-    const generation = ++this.generation, filters = this.filters;
-    this.loading = true;
-    cx.spawn(async (cx) => {
-      try {
-        const [prs, issues] = await Promise.all(["prs", "issues"].map((kind) => gh(listArgs(kind, filters), cwd, on)));
-        if (generation === this.generation) {
-          this.items = { prs, issues };
-          this.itemsQuery = filters.text;
-          this.error = null;
+    const generation = ++this.generation, filters = this.filters, cacheKey = listKey(context, filters);
+    const cached = readList(shared(CACHE_KEY), cacheKey);
+    if (cached) {
+      if (cached.prs) this.items = { ...this.items, prs: cached.prs.items };
+      if (cached.issues) this.items = { ...this.items, issues: cached.issues.items };
+      this.itemsQuery = cached.query;
+    }
+    const now = Date.now();
+    const needed = ["prs", "issues"].filter((kind) =>
+      force || !cached?.[kind] || now - cached[kind].at >= LIST_TTL_MS);
+    if (!needed.length) {
+      this.loadingKinds = new Set(); this.loading = false;
+      cx.notify();
+      return;
+    }
+    const loading = new Set(needed);
+    this.loadingKinds = loading; this.loading = true;
+    for (const kind of needed) this.errors[kind] = null;
+    for (const kind of needed) {
+      cx.spawn(async (cx) => {
+        try {
+          const items = await gh(listArgs(kind, filters), cwd, on);
+          if (generation === this.generation) {
+            this.items = { ...this.items, [kind]: items };
+            this.itemsQuery = filters.text;
+            this.errors[kind] = null;
+          }
+          this.saveList(kind, context, filters, items);
+        } catch (e) {
+          if (generation === this.generation) this.errors[kind] = String(e.message ?? e);
+        } finally {
+          if (this.loadingKinds === loading) {
+            loading.delete(kind);
+            this.loading = loading.size > 0;
+          }
+          if (generation === this.generation) cx.notify();
         }
-      } catch (e) { if (generation === this.generation) this.error = String(e.message ?? e); }
-      finally { if (generation === this.generation) this.loading = false; cx.notify(); }
-    });
+      });
+    }
     cx.notify();
   }
 
-  // A new repo: drop repository-specific filters and load its labels and milestones.
+  // A new repo: restore cached metadata, then load anything that is stale.
   resetFor(context, cwd, on, cx) {
     if (this.reader) { this.reader.nav.close(); this.reader = null; }
     this.cancelSearch();
-    this.context = context; this.items = { prs: [], issues: [] }; this.itemsQuery = null; this.error = null; this.repoLabels = [];
+    this.context = context; this.items = { prs: [], issues: [] }; this.itemsQuery = null; this.repoLabels = [];
     this.collapsed = this.collapsed ?? new Set(); this.collapsed.clear();
     this.filters = { ...this.filters, labels: new Set(), milestone: null };
     this.numberCache.clear(); this.numberPending.clear();
     this.numberLoading = null; this.numberError = null;
-    this.repoMilestones = []; this.milestonesError = null; this.milestonesLoading = Boolean(cwd);
+    this.errors = { prs: null, issues: null }; this.loadingKinds = new Set(); this.loading = false;
+    this.repoMilestones = []; this.milestonesError = null; this.milestonesLoading = false;
     if (!cwd) return;
+
+    const meta = readMeta(shared(CACHE_KEY), context), now = Date.now();
+    const labelsFresh = meta?.labelsAt && now - meta.labelsAt < META_TTL_MS;
+    const milestonesFresh = meta?.milestonesAt && now - meta.milestonesAt < META_TTL_MS;
+    if (meta?.labels) this.repoLabels = meta.labels;
+    if (meta?.milestones) this.repoMilestones = meta.milestones;
+    this.milestonesLoading = !milestonesFresh;
+
     const number = parseSearch(this.query).number;
     if (number !== null) cx.spawn((taskCx) => this.ensureNumber(number, taskCx));
-    cx.spawn(async (cx) => {
+    if (!labelsFresh) cx.spawn(async (cx) => {
       try {
         const labels = await gh(["label", "list", "--limit", "200", "--json", "name,color"], cwd, on);
         if (key() === context) this.repoLabels = labels;
-      } catch { if (key() === context) this.repoLabels = []; }
+        setShared(CACHE_KEY, writeMeta(shared(CACHE_KEY), context, { labels }));
+      } catch { /* Keep cached labels when the refresh fails. */ }
       cx.notify();
     });
-    cx.spawn(async (cx) => {
+    if (!milestonesFresh) cx.spawn(async (cx) => {
       try {
         const pages = await gh(["api", "repos/{owner}/{repo}/milestones?state=all&per_page=100", "--paginate", "--slurp"], cwd, on);
-        if (this.context === context) this.repoMilestones = pages.flat().sort((a, b) =>
+        const milestones = pages.flat().sort((a, b) =>
           (a.state === "closed") - (b.state === "closed") || a.title.localeCompare(b.title));
+        if (this.context === context) this.repoMilestones = milestones;
+        setShared(CACHE_KEY, writeMeta(shared(CACHE_KEY), context, { milestones }));
       } catch (e) {
         if (this.context === context) this.milestonesError = String(e.message ?? e);
       } finally {
@@ -493,16 +545,17 @@ export class Panel {
   }
 
   emptyText() {
-    if (this.error) return this.error;
+    const error = this.errors?.[this.tab];
+    if (error) return error;
     const parsed = parseSearch(this.query);
     if (parsed.number !== null) {
       const id = `${this.tab}:${parsed.number}`;
       if (this.numberLoading === id || this.searchTimer) return `Looking up #${parsed.number}…`;
       if (this.numberError?.id === id) return this.numberError.message;
-      if (this.loading) return "Loading…";
+      if (this.isLoading()) return "Loading…";
       return `No open ${this.tab === "prs" ? "PR" : "issue"} #${parsed.number}`;
     }
-    if (this.loading) return "Loading…";
+    if (this.isLoading()) return "Loading…";
     const what = this.tab === "prs" ? "pull requests" : "issues";
     if (parsed.text) {
       if (parsed.text !== this.filters.text) return `Searching for “${parsed.text}”…`;
@@ -520,7 +573,7 @@ export class Panel {
         .when(this.tab === "issues" && list.some((item) => this.sessions.matches(item.url).length),
           (e) => e.child(div().text_size(10).text_color("#f59e0b").child("● Session open")))
         .child(div().id("gh-refresh").px(8).h(26).flex().items_center().rounded(7).cursor_pointer().text_size(11).text_color(t.muted)
-          .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx)).child(this.loading ? "…" : "Refresh")))
+          .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx, true)).child(this.isLoading() ? "…" : "Refresh")))
       .child(this.filterBar(t))
       .when(this.filters.milestone !== null, (e) => e.child(div().px(12).py(5).flex_none().text_size(12).text_color(t.accent)
         .child(`Milestone: ${this.filters.milestone === false ? "No milestone" : this.filters.milestone}`)))
@@ -528,6 +581,6 @@ export class Panel {
       .when(Boolean(this.showMilestones), (e) => e.child(this.milestonePicker(t)))
       .child(v_flex().id("github-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
         .children(nodes.map((node) => node.kind === "group" ? this.groupNode(node, t) : this.row(node.item, t)))
-        .when(!nodes.length, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(this.emptyText()))));
+        .when(!nodes.length, (e) => e.child(div().p(8).text_color(this.errors?.[this.tab] ? t.ansi1 : t.dim).child(this.emptyText()))));
   }
 }

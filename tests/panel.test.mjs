@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { emptyCache, listKey, readList, readMeta, writeList, writeMeta } from '../mods/github/cache.js';
 
 // Test pure query construction without requiring Herdr's native JS runtime.
 const source = fs.readFileSync(new URL('../mods/github/panel.js', import.meta.url), 'utf8')
@@ -93,6 +94,44 @@ test('context changes refresh from the timer, not from render', () => {
   assert.equal(refreshes, 2);
   timers.get(500)(cx);
   assert.equal(refreshes, 2);
+});
+
+test('refresh renders cached issues immediately and only fetches a missing tab', async () => {
+  const filters = { sort: SORTS[0], labels: new Set(), text: '', milestone: null };
+  const context = JSON.stringify({ cwd: '/repo', on: null });
+  const cached = writeList(emptyCache(), listKey(context, filters), 'issues', [{ number: 1 }], '', Date.now());
+  const store = { value: cached }, calls = [], tasks = [];
+  const cx = { notify() {}, spawn(body) { tasks.push(body(cx)); } };
+
+  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', {
+    ...search, ...group,
+    spaces: () => [{ active: true, folder: '/repo', machine: null }],
+    focused: () => ({ pane: 'pane', cwd: '/repo' }),
+    panes: () => [{ pane: 'pane', cwd: '/repo' }],
+    shared: () => store.value,
+    setShared: (_key, value) => { store.value = value; },
+    listKey, readList, readMeta: () => null, writeList, writeMeta: () => store.value,
+    exec: async (_command, args) => {
+      calls.push(args);
+      return { code: 0, stdout: JSON.stringify([{ number: args[0] === 'pr' ? 2 : 1 }]) };
+    },
+  });
+  const panel = new TestPanel();
+  panel.context = context; panel.generation = 0; panel.filters = filters;
+  panel.items = { prs: [], issues: [] }; panel.errors = { prs: null, issues: null };
+  panel.loadingKinds = new Set(); panel.loading = false; panel.tab = 'issues';
+  panel.query = ''; panel.itemsQuery = null;
+  panel.refresh(cx);
+
+  assert.equal(JSON.stringify(panel.items.issues), '[{"number":1}]', 'cached Issues are visible synchronously');
+  assert.equal(panel.isLoading('issues'), false, 'a fresh cached Issues tab is not loading');
+  assert.equal(panel.isLoading('prs'), true, 'only the missing PR tab is loading');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'pr');
+
+  await Promise.all(tasks);
+  assert.equal(JSON.stringify(panel.items.prs), '[{"number":2}]');
+  assert.equal(panel.loading, false);
 });
 
 test('typing filters the loaded page immediately, and a number selects one row', () => {

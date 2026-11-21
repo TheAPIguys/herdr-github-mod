@@ -36,8 +36,18 @@ show how many child issues are open and how many are done, and a chevron
 collapses or expands the group. Search expands matching groups automatically.
 The **Sub-issues** chip in the filter bar turns grouping off; the flat list
 still marks children with a `↳ #parent` badge. Groups work from GitHub's native
-`parent` / `subIssues` data, so no extra requests or local bookkeeping are
-needed.
+`parent` / `subIssuesSummary` data, so no extra requests or local bookkeeping
+are needed.
+
+## Loading and cache
+
+The last issue and PR lists are cached per repository, worktree, machine, sort,
+and filter combination in Herdr's local shared state. Reopening the panel shows
+that cached list immediately and refreshes it in the background; Issues and PRs
+load independently, so a slow PR query never holds up the Issues tab. Labels
+and milestones are cached for ten minutes. The first load after a cache miss,
+or a manual **Refresh**, still waits for GitHub. PR CI checks remain the slowest
+GitHub query.
 
 ## Search
 
@@ -193,6 +203,7 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 - `mods/github/panel.js`: lists, filters, milestone picker, title rendering.
 - `mods/github/search.js`: `#number` parsing, fuzzy scoring, and result ranking.
 - `mods/github/group.js`: parent/sub-issue grouping and progress labels.
+- `mods/github/cache.js`: device cache keys, validation, and pruning.
 - `mods/github/mod.json`: popup size.
 - `mods/github/issue-reader.js`: read-only native issue discussion and link handling.
 - `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.
