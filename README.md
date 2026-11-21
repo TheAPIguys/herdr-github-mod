@@ -63,10 +63,11 @@ for one minute. No issue descriptions or comments are saved to this repository.
 
 **Start agent** is available only in the original repository, to avoid creating
 a worktree in the wrong checkout when following cross-repository links. The
-dialog remembers the last started agent, model and reasoning level. A
-highlighted **Current selection** bar shows the exact model and level that will
-be used, the active row is checked, and the model list scrolls the remembered
-choice into view. Use **☆ Favorite** to save the current model + reasoning
+dialog remembers the last started agent, model and reasoning level. It uses
+most of the window height, keeps **Start agent** pinned at the bottom, and
+scrolls its form only when needed. A highlighted **Current selection** bar
+shows the exact model and level that will be used, the active row is checked,
+and the model list scrolls the remembered choice into view. Use **☆ Favorite** to save the current model + reasoning
 combination; saved combinations are per agent, appear first as one-click chips,
 and can be removed with the chip's **×**. Model search is fuzzy across names,
 IDs, and reasoning levels, and typing an unlisted ID still selects a custom

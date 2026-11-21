@@ -437,20 +437,20 @@ export default class IssueAgent extends View {
   render(cx) {
     const t = theme(), hasModels = this.agent && adapterFor(this.agent);
     const sessions = this.sessions.matches(this.issue.url);
-    return v_flex().id("issue-agent").size_full().min_h(0).overflow_y_scrollbar().p(16).gap(14).bg(t.popover).text_color(t.foreground).text_size(12.5)
+    return v_flex().id("issue-agent").size_full().min_h(0).p(16).gap(12).bg(t.popover).text_color(t.foreground).text_size(12.5)
       .child(v_flex().gap(2)
         .child(div().text_size(14).font_semibold().child(`Start an agent on #${this.issue.number}`))
         .child(div().text_color(t.dim).truncate().child(this.issue.title)))
-      .child(this.section("Branch", this.field(this.branchInput, t), t))
-      .child(this.messageSection(t))
-      .when(sessions.length > 0, (e) => e.child(v_flex().gap(6)
-        .child(div().text_color("#f59e0b").child("● Session already open for this issue. You can still start another."))
-        .child(this.chip("existing-session", "Go to session", false, () => {
-          focusSession(sessions[0]); closeOverlay(props().overlay);
-        }, t))))
-      .child(this.section("Agent", this.agentRow(t), t))
-      .when(Boolean(hasModels), (e) => e.child(this.modelSection(t)).child(this.section(this.variantTitle(), this.effortRow(t), t)))
-      .child(div().flex_1())
+      .child(v_flex().id("issue-agent-body").flex_1().min_h(0).overflow_y_scrollbar().gap(14)
+        .child(this.section("Branch", this.field(this.branchInput, t), t))
+        .child(this.messageSection(t))
+        .when(sessions.length > 0, (e) => e.child(v_flex().gap(6)
+          .child(div().text_color("#f59e0b").child("● Session already open for this issue. You can still start another."))
+          .child(this.chip("existing-session", "Go to session", false, () => {
+            focusSession(sessions[0]); closeOverlay(props().overlay);
+          }, t))))
+        .child(this.section("Agent", this.agentRow(t), t))
+        .when(Boolean(hasModels), (e) => e.child(this.modelSection(t)).child(this.section(this.variantTitle(), this.effortRow(t), t))))
       .child(this.footer(t));
   }
 }
