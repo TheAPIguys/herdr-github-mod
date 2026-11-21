@@ -9,6 +9,8 @@ const source = fs.readFileSync(new URL('../mods/github/panel.js', import.meta.ur
 const { listArgs, Panel, SORTS } = vm.runInNewContext(source + '\n;({listArgs, Panel, SORTS})');
 const searchSource = fs.readFileSync(new URL('../mods/github/search.js', import.meta.url), 'utf8').replace(/^export /gm, '');
 const search = vm.runInNewContext(searchSource + '\n;({parseSearch, rankItems, rankSearchResults})');
+const groupSource = fs.readFileSync(new URL('../mods/github/group.js', import.meta.url), 'utf8').replace(/^export /gm, '');
+const group = vm.runInNewContext(groupSource + '\n;({groupIssues, groupLabel, subIssueCountLabel})');
 const base = { sort: SORTS[0], labels: new Set(['bug']), text: 'login', milestone: null };
 const sample = [
   { number: 12, title: 'Fix login crash', author: { login: 'ada' }, labels: [] },
@@ -16,7 +18,7 @@ const sample = [
   { number: 56, title: 'Document login settings', author: { login: 'carol' }, labels: [] },
 ];
 function searchPanel() {
-  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', { ...search });
+  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', { ...search, ...group });
   const panel = new TestPanel();
   panel.items = { issues: sample, prs: [] };
   panel.numberCache = new Map(); panel.numberPending = new Map();
@@ -121,6 +123,31 @@ test('Enter on #number opens that issue', () => {
   panel.search = { value: () => '#56' };
   panel.submitSearch({ notify() {} });
   assert.deepEqual(opened, [56]);
+});
+
+test('sub-issues group under their parent, and the flat view restores every row', () => {
+  const panel = searchPanel();
+  const parent = {
+    number: 10, title: 'Parent', author: { login: 'ada' }, labels: [], state: 'OPEN',
+    createdAt: '2026-01-03T00:00:00Z', updatedAt: '2026-01-03T00:00:00Z',
+    subIssuesSummary: { total: 2, completed: 1 },
+  };
+  const child = {
+    number: 11, title: 'Child', author: { login: 'bob' }, labels: [], state: 'OPEN',
+    createdAt: '2026-01-02T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z',
+    parent: { number: 10, title: 'Parent', state: 'OPEN' },
+  };
+  panel.items.issues = [child, parent, { ...sample[0], parent: null }];
+  panel.groupSubIssues = true;
+  const nodes = panel.displayNodes();
+  assert.equal(nodes[0].kind, 'group');
+  assert.equal(nodes[0].parent.number, 10);
+  assert.equal(JSON.stringify(Array.from(nodes[0].children, (item) => item.number)), '[11]');
+  assert.equal(nodes[1].kind, 'issue');
+  assert.equal(nodes[1].item.number, 12);
+
+  panel.groupSubIssues = false;
+  assert.equal(JSON.stringify(Array.from(panel.displayNodes(), (node) => node.item.number)), '[11,10,12]');
 });
 
 test('an uncommitted query still shows the Clear control', () => {

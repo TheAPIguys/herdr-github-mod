@@ -6,6 +6,8 @@ This is not the separate `git-d-herdr` terminal dashboard.
 ## Features
 
 - Open issues and pull requests, search, label filters, and sorting.
+- Group open sub-issues under their parent, with progress and collapsible
+  groups. **Sub-issues** in the filter bar switches back to a flat list.
 - Search as you type: fuzzy local matching on number, title, author, labels,
   milestone, and branch; a short pause then searches GitHub for results beyond
   the loaded page.
@@ -28,6 +30,14 @@ This is not the separate `git-d-herdr` terminal dashboard.
 Lists currently return up to 50 results per tab, filtered on GitHub first.
 "No milestone" means unassigned items, not all items. Select the **Issues**
 tab to view issues; **PRs** displays pull requests.
+
+On the Issues tab, open sub-issues are grouped under their parent. Parent rows
+show how many child issues are open and how many are done, and a chevron
+collapses or expands the group. Search expands matching groups automatically.
+The **Sub-issues** chip in the filter bar turns grouping off; the flat list
+still marks children with a `↳ #parent` badge. Groups work from GitHub's native
+`parent` / `subIssues` data, so no extra requests or local bookkeeping are
+needed.
 
 ## Search
 
@@ -182,6 +192,7 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 
 - `mods/github/panel.js`: lists, filters, milestone picker, title rendering.
 - `mods/github/search.js`: `#number` parsing, fuzzy scoring, and result ranking.
+- `mods/github/group.js`: parent/sub-issue grouping and progress labels.
 - `mods/github/mod.json`: popup size.
 - `mods/github/issue-reader.js`: read-only native issue discussion and link handling.
 - `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.

@@ -2,6 +2,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, theme, nextCommand, openOverlay } from "herdr";
 import { summarizeChecks, checksIcon } from "./checks.js";
+import { groupIssues, groupLabel, subIssueCountLabel } from "./group.js";
 import { openUrl } from "./open.js";
 import { IssueReader } from "./issue-reader.js";
 import { issueTarget } from "./issue-model.js";
@@ -21,9 +22,9 @@ const KINDS = {
   },
   issues: {
     label: "Issues",
-    fields: "number,title,author,url,labels,milestone,createdAt,updatedAt,state",
+    fields: "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssues,subIssuesSummary",
     args: ["issue", "list", "--state", "open", "--limit", LIMIT, "--json",
-      "number,title,author,url,labels,milestone,createdAt,updatedAt,state"],
+      "number,title,author,url,labels,milestone,createdAt,updatedAt,state,parent,subIssues,subIssuesSummary"],
   },
 };
 // Sorted by GitHub's search, so "Oldest" reaches past the newest 50.
@@ -89,6 +90,7 @@ export class Panel {
     this.sessions = new IssueSessions();
     this.sessions.init(cx);
     this.tab = "issues"; this.items = { prs: [], issues: [] }; this.repoLabels = []; this.generation = 0;
+    this.groupSubIssues = true; this.collapsed = new Set();
     this.repoMilestones = []; this.milestonesLoading = false; this.milestonesError = null;
     this.filters = { sort: SORTS[0], labels: new Set(), text: "", milestone: null };
     // `query` follows every keystroke for instant local filtering; `filters.text`
@@ -147,6 +149,7 @@ export class Panel {
     if (this.reader) { this.reader.nav.close(); this.reader = null; }
     this.cancelSearch();
     this.context = context; this.items = { prs: [], issues: [] }; this.itemsQuery = null; this.error = null; this.repoLabels = [];
+    this.collapsed = this.collapsed ?? new Set(); this.collapsed.clear();
     this.filters = { ...this.filters, labels: new Set(), milestone: null };
     this.numberCache.clear(); this.numberPending.clear();
     this.numberLoading = null; this.numberError = null;
@@ -296,6 +299,22 @@ export class Panel {
     return this.itemsQuery === parsed.text ? rankSearchResults(items, parsed.text) : rankItems(items, parsed.text);
   }
 
+  /** Parent rows with their loaded children, or one flat row per issue. */
+  displayNodes() {
+    const list = this.visibleItems();
+    const parsed = parseSearch(this.query);
+    if (this.tab !== "issues" || this.groupSubIssues === false || parsed.number !== null) {
+      return list.map((item) => ({ kind: "issue", item }));
+    }
+    return groupIssues(list);
+  }
+
+  toggleGroup(number, cx) {
+    if (!this.collapsed) this.collapsed = new Set();
+    if (this.collapsed.has(number)) this.collapsed.delete(number); else this.collapsed.add(number);
+    cx.notify();
+  }
+
   cycleSort(cx) {
     const next = SORTS[(SORTS.indexOf(this.filters.sort) + 1) % SORTS.length];
     this.setFilters({ sort: next }, cx);
@@ -350,6 +369,8 @@ export class Panel {
         (cx) => { this.showLabels = !this.showLabels; cx.notify(); }, t))
       .child(this.filterChip("gh-milestones", "Milestones", this.filters.milestone !== null || this.showMilestones,
         (cx) => { this.showMilestones = !this.showMilestones; cx.notify(); }, t))
+      .when(this.tab === "issues", (e) => e.child(this.filterChip("gh-subissues", "Sub-issues", this.groupSubIssues !== false,
+        (cx) => { this.groupSubIssues = this.groupSubIssues === false; cx.notify(); }, t)))
       .child(div().flex_1().min_w(0).h(24).px(8).flex().items_center().rounded(6).border_1()
         .border_color(this.query ? t.accent : t.border).bg(t.background)
         .child(Input.new(this.search).h_full().text_size(11).text_color(t.foreground)))
@@ -396,10 +417,12 @@ export class Panel {
       .child(div().min_w(0).truncate().child(pr.headRefName));
   }
 
-  issueMeta(issue, t) {
+  issueMeta(issue, t, extra = {}) {
     return h_flex().gap(6).text_size(11).text_color(t.dim).min_w(0).overflow_hidden()
-      .children(issue.labels.slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)))
-      .when(issue.state && issue.state !== "OPEN", (e) => e.child(div().text_color(t.muted).child(issue.state.toLowerCase())));
+      .when(Boolean(extra.group), (e) => e.child(div().min_w(0).truncate().text_color(t.accent).child(extra.group)))
+      .children((issue.labels ?? []).slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)))
+      .when(issue.state && issue.state !== "OPEN", (e) => e.child(div().text_color(t.muted).child(issue.state.toLowerCase())))
+      .when(Boolean(extra.parent), (e) => e.child(div().flex_none().text_color(t.dim).child(extra.parent)));
   }
 
   startAgent(issue, source = location()) {
@@ -423,25 +446,50 @@ export class Panel {
       .on_click((_e, cx) => { cx.stop_propagation(); this.startAgent(issue); }).child("Agent");
   }
 
-  row(item, t) {
+  row(item, t, options = {}) {
     const sessions = this.tab === "issues" ? this.sessions.matches(item.url) : [];
-    const meta = this.tab === "prs" ? this.prMeta(item, t) : this.issueMeta(item, t);
+    const group = options.group ?? null;
+    const groupText = group ? groupLabel(group.summary)
+      : this.tab === "issues" && !options.child ? subIssueCountLabel(item) : null;
+    const parentText = this.tab === "issues" && !options.child && item.parent ? `↳ #${item.parent.number}` : null;
+    const meta = this.tab === "prs" ? this.prMeta(item, t) : this.issueMeta(item, t, { group: groupText, parent: parentText });
     const date = item[this.filters.sort.date] ?? item.updatedAt;
+    const byline = [item.author?.login, date ? ago(date) : ""].filter(Boolean).join(" · ");
     return v_flex().id(`gh-${this.tab}-${item.number}`).flex_none().px(10).py(7).gap(3).rounded(7).cursor_pointer()
+      .when(Boolean(group), (e) => e.bg(t.raised))
       .hover((s) => s.bg(t.hover)).on_click((_event, cx) => {
         if (this.tab === "issues") this.openIssue(item, cx); else openUrl(item.url);
       })
       .child(h_flex().gap(8).items_center()
+        .when(Boolean(group) && group.toggle !== false, (e) => e.child(h_flex().id(`gh-group-toggle-${item.number}`).w(16).h(18).flex_none()
+          .items_center().justify_center().rounded(4).cursor_pointer().text_color(t.muted)
+          .hover((s) => s.bg(t.selected).text_color(t.foreground))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); this.toggleGroup(item.number, cx); })
+          .child(group.collapsed ? "▸" : "▾")
+          .tooltip(group.collapsed ? "Expand sub-issues" : "Collapse sub-issues")
+          .accessibility_label(group.collapsed ? "Expand sub-issues" : "Collapse sub-issues")))
         .when(sessions.length > 0, (e) => e.child(div().id(`gh-session-dot-${item.number}`).size(7).flex_none()
           .rounded(4).bg("#f59e0b").cursor_pointer()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => { cx.stop_propagation(); focusSession(sessions[0]); })))
         .child(div().flex_none().text_size(11).text_color(t.accent).child(`#${item.number}`))
-        .child(div().flex_1().min_w(0).whitespace_normal().text_size(14).child(item.title))
+        .child(div().flex_1().min_w(0).whitespace_normal().text_size(options.child ? 13 : 14)
+          .when(Boolean(group), (e) => e.font_semibold()).child(item.title))
         .when(this.tab === "issues", (e) => e.child(this.agentButton(item, t))))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).child(meta))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(`${item.author?.login ?? ""} · ${ago(date)}`)));
+        .when(Boolean(byline), (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child(byline))));
+  }
+
+  groupNode(node, t) {
+    const searching = Boolean(String(this.query ?? "").trim());
+    const collapsed = !searching && Boolean(this.collapsed?.has(node.parent.number));
+    return v_flex().id(`gh-group-${node.parent.number}`).flex_none().gap(2)
+      .child(this.row(node.parent, t, { group: { summary: node.summary, collapsed, toggle: !searching } }))
+      .when(!collapsed, (e) => e.child(v_flex().id(`gh-group-children-${node.parent.number}`).flex_none().gap(1)
+        .ml(10).pl(10).border_l(1).border_color(t.border)
+        .children(node.children.map((item) => this.row(item, t, { child: true })))));
   }
 
   emptyText() {
@@ -465,7 +513,7 @@ export class Panel {
 
   render(cx) {
     if (this.reader?.nav.current) return this.reader.render();
-    const t = theme(), list = this.visibleItems();
+    const t = theme(), list = this.visibleItems(), nodes = this.displayNodes();
     return v_flex().id("github").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
         .child(this.tabButton("prs", t)).child(this.tabButton("issues", t)).child(div().flex_1())
@@ -479,7 +527,7 @@ export class Panel {
       .when(Boolean(this.showLabels), (e) => e.child(this.labelPicker(t)))
       .when(Boolean(this.showMilestones), (e) => e.child(this.milestonePicker(t)))
       .child(v_flex().id("github-list").flex_1().min_h(0).overflow_y_scrollbar().p(6).gap(2)
-        .children(list.map((item) => this.row(item, t)))
-        .when(!list.length, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(this.emptyText()))));
+        .children(nodes.map((node) => node.kind === "group" ? this.groupNode(node, t) : this.row(node.item, t)))
+        .when(!nodes.length, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(this.emptyText()))));
   }
 }

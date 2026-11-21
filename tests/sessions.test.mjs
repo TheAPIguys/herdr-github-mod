@@ -107,6 +107,7 @@ test('issue rows show a small orange dot only for matching open sessions; PRs do
   let focused = 0, stopped = 0;
   const { Panel } = vm.runInNewContext(panelSource + '\n;({Panel})', {
     div: element, h_flex: element, v_flex: element,
+    subIssueCountLabel: () => null, groupLabel: () => "", groupIssues: () => [],
     focusSession: () => ++focused,
   });
   const panel = new Panel();
