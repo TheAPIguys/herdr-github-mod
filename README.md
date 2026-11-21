@@ -17,7 +17,9 @@ This is not the separate `git-d-herdr` terminal dashboard.
 - Click an issue to read its full formatted description and discussion inside the mod.
 - Follow linked issues (including closed and cross-repository issues), then use Back
   or Issues list to return without resetting list filters. Other links open the browser.
-- Start an installed coding agent in a Git worktree, selecting its model.
+- Start an installed coding agent in a Git worktree, selecting its model and
+  reasoning level. The current choice is highlighted, and favorite model +
+  level combinations stay pinned above the full list.
 - Editable initial message template with `{issue#}`, `{title}`, `{branch}`,
   `{url}`, and `{repo}` placeholders, saved per repository and machine in
   Herdr's local state.
@@ -61,9 +63,19 @@ for one minute. No issue descriptions or comments are saved to this repository.
 
 **Start agent** is available only in the original repository, to avoid creating
 a worktree in the wrong checkout when following cross-repository links. The
-dialog's **Initial message** can be edited and is saved for that GitHub
+dialog remembers the last started agent, model and reasoning level. A
+highlighted **Current selection** bar shows the exact model and level that will
+be used, the active row is checked, and the model list scrolls the remembered
+choice into view. Use **☆ Favorite** to save the current model + reasoning
+combination; saved combinations are per agent, appear first as one-click chips,
+and can be removed with the chip's **×**. Model search is fuzzy across names,
+IDs, and reasoning levels, and typing an unlisted ID still selects a custom
+model.
+
+The dialog's **Initial message** can be edited and is saved for that GitHub
 repository and machine in Herdr's local `shared` state
-(`~/.config/herdr-app/shared.json`). **Reset** restores the built-in default.
+(`~/.config/herdr-app/shared.json`), along with the favorites and last choice.
+**Reset** restores the built-in default message.
 The reader itself is read-only. Styling follows Herdr's native
 renderer: it is not a pixel-identical GitHub page, rich issue-title previews
 are not fetched, and some images/GitHub-specific formatting may require
@@ -172,8 +184,9 @@ Restart Herdr. Do not delete the linked checkout while it is installed.
 - `mods/github/mod.json`: popup size.
 - `mods/github/issue-reader.js`: read-only native issue discussion and link handling.
 - `mods/github/issue-model.js`: trusted issue URL parsing, history, cache, and request guards.
-- `mods/issue-agent/main.js`: worktree creation, dialog, initial prompt.
+- `mods/issue-agent/main.js`: worktree creation, dialog, initial prompt, model selection.
 - `mods/issue-agent/agents.js`: agent-specific model/launch adapters.
+- `mods/issue-agent/model-choices.js`: model + reasoning favorites and fuzzy model search.
 - `mods/{github,issue-agent}/sessions.js`: identical sandbox-local session matching helpers.
 
 This repository preserves the existing locally installed mods plus personal

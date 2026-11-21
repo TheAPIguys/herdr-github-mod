@@ -5,10 +5,12 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { exec, run, props, closeOverlay, theme, knownAgents, home, readTextFile, shared, setShared } from "herdr";
 import { adapterFor } from "./agents.js";
+import { favoritesForAgent, favoriteLabel, isFavorite, rankFavorites, rankModels, storeWithFavorites, toggleFavorite } from "./model-choices.js";
 import { IssueSessions, focusSession, issueKey } from "./sessions.js";
 
 const LAST_CHOICE = "issue-agent.last";
 const MODEL_CACHE = "issue-agent.models.v2";
+const FAVORITES = "issue-agent.favorites.v1";
 const TEMPLATES = "issue-agent.templates.v1";
 const CACHE_MS = 60 * 60 * 1000;
 const DEFAULT_TASK_TEMPLATE = "Work on GitHub issue #{issue#}: {title}. Read it with `gh issue view {issue#}`. You are in a fresh worktree on branch {branch}.";
@@ -138,9 +140,9 @@ export default class IssueAgent extends View {
     this.messageInput.on("blur", () => this.saveTemplate());
     this.sessions = new IssueSessions();
     this.sessions.init(cx);
-    this.agents = []; this.models = []; this.filter = "";
+    this.agents = []; this.models = []; this.filter = ""; this.favorites = []; this.loadingModels = false;
     this.branchInput = InputState.new({ value: branchFor(this.issue), placeholder: "branch name" });
-    this.filterInput = InputState.new({ placeholder: "filter or type a model" });
+    this.filterInput = InputState.new({ placeholder: "Search or type a model ID" });
     this.filterInput.on("change", (_e, cx) => { this.filter = this.filterInput.value().trim(); cx.notify(); });
     this.branchInput.on("submit", (_e, cx) => this.start(cx));
     this.loadAgents(cx);
@@ -159,8 +161,9 @@ export default class IssueAgent extends View {
 
   pickAgent(agent, cx, last = {}) {
     if (!agent) { this.error = "No agent installed on this machine"; return; }
-    this.agent = agent; this.models = []; this.model = null; this.effort = null; this.modelsError = null;
-    this.filterInput.set_value(""); this.filter = "";
+    this.agent = agent; this.models = []; this.model = null; this.effort = null; this.modelsError = null; this.loadingModels = false;
+    this.favorites = favoritesForAgent(shared(FAVORITES), agent.key);
+    this.clearFilter();
     if (!adapterFor(agent)) return cx.notify();
     this.loadingModels = true;
     cx.spawn(async (cx) => {
@@ -169,23 +172,76 @@ export default class IssueAgent extends View {
         if (this.agent !== agent) return;
         this.models = models;
         const remembered = last.agent === agent.key ? models.find((m) => m.id === last.model) : null;
-        this.pickModel(remembered ?? null, remembered ? last.effort : null);
+        this.pickModel(remembered ?? null, remembered ? last.effort : undefined);
       } catch (e) { if (this.agent === agent) this.modelsError = String(e.message ?? e); }
       finally { if (this.agent === agent) this.loadingModels = false; cx.notify(); }
     });
     cx.notify();
   }
 
-  pickModel(model, effort = null) {
+  pickModel(model, effort) {
     this.model = model;
     const efforts = model?.efforts ?? [];
-    this.effort = efforts.includes(effort) ? effort : efforts.includes(model?.effort) ? model.effort : null;
+    const fallback = efforts.includes(model?.effort) ? model.effort : null;
+    if (effort === undefined) this.effort = fallback;
+    else this.effort = effort === null || efforts.includes(effort) ? effort : fallback;
+  }
+
+  clearFilter() {
+    this.filter = "";
+    this.filterInput.set_value("");
   }
 
   // The typed model when it matches none, so models a CLI can't list still work.
   chosenModelId() {
     if (this.model) return this.model.id;
     return this.filter && !this.models.some((m) => m.id === this.filter) ? this.filter : null;
+  }
+
+  modelName(model = this.model) {
+    if (!model) return "";
+    return model.label && model.label !== model.id ? `${model.label} · ${model.id}` : model.id;
+  }
+
+  selectionLabel() {
+    if (this.loadingModels && !this.models.length) return "Loading models…";
+    const chosen = this.chosenModelId();
+    if (!chosen) return "Agent's default";
+    const name = this.model ? this.modelName(this.model) : chosen;
+    if (this.effort) return `${name} · ${this.effort}`;
+    return (this.model?.efforts ?? []).length ? `${name} · default` : name;
+  }
+
+  persistFavorites() {
+    const key = this.agent?.key;
+    if (key) setShared(FAVORITES, storeWithFavorites(shared(FAVORITES), key, this.favorites));
+  }
+
+  toggleCurrentFavorite(cx) {
+    const chosen = this.chosenModelId();
+    if (!chosen) return;
+    this.favorites = toggleFavorite(this.favorites, chosen, this.effort).favorites;
+    this.persistFavorites();
+    cx.notify();
+  }
+
+  removeFavorite(favorite, cx) {
+    this.favorites = toggleFavorite(this.favorites, favorite.model, favorite.effort).favorites;
+    this.persistFavorites();
+    cx.notify();
+  }
+
+  applyFavorite(favorite, cx) {
+    const model = this.models.find((m) => m.id === favorite.model);
+    if (model) {
+      this.pickModel(model, favorite.effort);
+    } else {
+      this.model = null;
+      this.effort = null;
+      this.filter = favorite.model;
+      this.filterInput.set_value(favorite.model);
+    }
+    cx.notify();
   }
 
   saveTemplate() {
@@ -259,26 +315,112 @@ export default class IssueAgent extends View {
       this.chip(`agent-${a.key}`, a.name, this.agent === a, (cx) => this.pickAgent(a, cx), t, this.agentIcon(a, t))));
   }
 
+  modelSection(t) {
+    return v_flex().gap(6)
+      .child(h_flex().items_center().gap(8)
+        .child(div().text_size(11).text_color(t.dim).child("Model"))
+        .child(div().flex_1())
+        .child(this.favoriteButton(t)))
+      .child(this.modelList(t));
+  }
+
+  favoriteButton(t) {
+    const chosen = this.chosenModelId();
+    if (!chosen) return div();
+    const saved = isFavorite(this.favorites, chosen, this.effort);
+    return h_flex().id("favorite-current").h(22).px(7).gap(5).items_center().rounded(6).cursor_pointer()
+      .text_color(saved ? t.accent : t.muted).hover((s) => s.bg(t.hover))
+      .tooltip(saved ? "Remove this model and reasoning level from favorites" : "Save this model and reasoning level as a favorite")
+      .on_click((_e, cx) => this.toggleCurrentFavorite(cx))
+      .child(saved ? "★" : "☆")
+      .child(div().text_size(10).child(saved ? "Saved" : "Favorite"));
+  }
+
+  selectionBar(t) {
+    return h_flex().id("current-selection").px(10).py(7).gap(9).items_center().rounded(8)
+      .bg(t.selected).border_1().border_color(t.accent)
+      .child(div().text_color(t.accent).child("✓"))
+      .child(v_flex().flex_1().min_w(0).gap(1)
+        .child(div().text_size(10).text_color(t.dim).child("Current selection"))
+        .child(div().truncate().font_semibold().text_color(t.foreground).child(this.selectionLabel())));
+  }
+
+  searchField(t) {
+    return h_flex().h(30).px(10).gap(6).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(Input.new(this.filterInput).flex_1().h_full().text_size(12).text_color(t.foreground))
+      .when(Boolean(this.filter), (e) => e.child(h_flex().id("clear-model-filter").h(20).w(20).items_center().justify_center().rounded(5).cursor_pointer()
+        .text_color(t.dim).hover((s) => s.bg(t.hover)).on_click((_e, cx) => { this.clearFilter(); cx.notify(); })
+        .child("×").tooltip("Clear search").accessibility_label("Clear model search")));
+  }
+
+  favoriteChip(favorite, index, t) {
+    const chosen = this.chosenModelId();
+    const selected = chosen === favorite.model && (this.effort ?? null) === (favorite.effort ?? null);
+    return h_flex().id(`favorite-${index}`).h(26).pl(9).pr(4).gap(6).items_center().rounded(7).cursor_pointer().flex_none()
+      .bg(selected ? t.selected : t.raised).border_1().border_color(selected ? t.accent : t.border)
+      .tooltip(`${favorite.model}${favorite.effort ? ` · ${favorite.effort}` : ""}`)
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.applyFavorite(favorite, cx))
+      .child(div().text_color(t.accent).child("★"))
+      .child(div().text_color(selected ? t.foreground : t.muted).child(favoriteLabel(favorite, this.models)))
+      .child(h_flex().id(`remove-favorite-${index}`).h(18).w(18).items_center().justify_center().rounded(4).cursor_pointer()
+        .text_color(t.dim).hover((s) => s.bg(t.selected).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.removeFavorite(favorite, cx); })
+        .child("×").tooltip("Remove favorite").accessibility_label("Remove favorite"));
+  }
+
+  favoritesBlock(favorites, t) {
+    return v_flex().gap(5)
+      .child(div().text_size(10).text_color(t.dim).child(`Favorites (${favorites.length})`))
+      .child(h_flex().flex_wrap().gap(6).children(favorites.map((favorite, index) => this.favoriteChip(favorite, index, t))));
+  }
+
   modelList(t) {
-    const f = this.filter.toLowerCase();
-    const shown = this.models.filter((m) => !f || `${m.id} ${m.label ?? ""}`.toLowerCase().includes(f)).slice(0, 100);
+    const query = this.filter.trim();
+    const ranked = rankModels(this.models, query);
+    // Keep the active model in view when the dialog opens on a remembered choice.
+    if (!query && this.model) {
+      const at = ranked.indexOf(this.model);
+      if (at > 0) { ranked.splice(at, 1); ranked.unshift(this.model); }
+    }
+    const shown = ranked.slice(0, 100);
+    const matchedFavorites = rankFavorites(this.favorites, this.models, query);
+    const showFavorites = matchedFavorites.length > 0 && !(this.loadingModels && !this.models.length);
     const custom = this.chosenModelId() && !this.model ? this.chosenModelId() : null;
     const row = (id, label, selected, onClick) => h_flex().id(`model-${id}`).h(26).px(8).gap(8).items_center().rounded(6).flex_none().cursor_pointer()
-      .when(selected, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => { onClick(); cx.notify(); })
-      .child(div().flex_1().min_w(0).truncate().text_color(selected ? t.foreground : t.muted).child(label));
-    return v_flex().gap(6).child(this.field(this.filterInput, t))
+      .when(selected, (e) => e.bg(t.selected).border_1().border_color(t.accent))
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { onClick(cx); cx.notify(); })
+      .child(div().w(12).flex_none().text_color(t.accent).when(selected, (e) => e.child("✓")))
+      .child(div().flex_1().min_w(0).truncate().text_color(selected ? t.foreground : t.muted).when(selected, (e) => e.font_semibold()).child(label));
+    return v_flex().gap(6)
+      .child(this.selectionBar(t))
+      .child(this.searchField(t))
+      .when(showFavorites, (e) => e.child(this.favoritesBlock(matchedFavorites, t)))
+      .when(showFavorites, (e) => e.child(div().text_size(10).text_color(t.dim).child("All models")))
       .child(v_flex().id("models").h(170).overflow_y_scrollbar().gap(1)
-        .child(row("default", custom ? `Use "${custom}"` : "Agent's default", !this.model, () => this.pickModel(null)))
-        .children(shown.map((m) => row(m.id, m.label && m.label !== m.id ? `${m.label}  ·  ${m.id}` : m.id, this.model === m, () => this.pickModel(m, this.effort))))
+        .child(row("default", "Agent's default", !this.chosenModelId(), (cx) => { this.clearFilter(); this.pickModel(null); }))
+        .when(Boolean(custom), (e) => e.child(row("custom", `Custom: ${custom}`, !this.model, () => this.pickModel(null))))
+        .children(shown.map((m) => row(m.id, this.modelName(m), this.model === m, () => this.pickModel(m, this.effort))))
         .when(this.loadingModels, (e) => e.child(div().px(8).py(4).text_color(t.dim).child("Loading models…")))
         .when(Boolean(this.modelsError), (e) => e.child(div().px(8).py(4).text_color(t.ansi1).child(this.modelsError))));
   }
 
   effortRow(t) {
-    const efforts = this.model?.efforts ?? [];
-    if (!efforts.length) return div().text_color(t.dim).child(this.model ? "This model has no variants / reasoning levels" : "Select a model to see its variants / reasoning levels");
-    return h_flex().flex_wrap().gap(6).children(efforts.map((e) =>
-      this.chip(`effort-${e}`, e, this.effort === e, () => { this.effort = this.effort === e ? null : e; }, t)));
+    if (!this.model) {
+      return div().text_color(t.dim).child(this.chosenModelId() ? "Custom model · variants are unavailable" : "Select a model to see its variants / reasoning levels");
+    }
+    const efforts = this.model.efforts ?? [];
+    if (!efforts.length) return div().text_color(t.dim).child("This model has no variants / reasoning levels");
+    const defaultSelected = this.effort === null;
+    return h_flex().flex_wrap().gap(6)
+      .child(this.chip("effort-default", defaultSelected ? "✓ Default" : "Default", defaultSelected, () => { this.effort = null; }, t))
+      .children(efforts.map((e) => {
+        const selected = this.effort === e;
+        return this.chip(`effort-${e}`, selected ? `✓ ${e}` : e, selected, () => { this.effort = e; }, t);
+      }));
+  }
+
+  variantTitle() {
+    return (this.model?.efforts ?? []).length ? `Variant / Reasoning · ${this.effort ?? "default"}` : "Variant / Reasoning";
   }
 
   footer(t) {
@@ -307,7 +449,7 @@ export default class IssueAgent extends View {
           focusSession(sessions[0]); closeOverlay(props().overlay);
         }, t))))
       .child(this.section("Agent", this.agentRow(t), t))
-      .when(Boolean(hasModels), (e) => e.child(this.section("Model", this.modelList(t), t)).child(this.section("Variant / Reasoning", this.effortRow(t), t)))
+      .when(Boolean(hasModels), (e) => e.child(this.modelSection(t)).child(this.section(this.variantTitle(), this.effortRow(t), t)))
       .child(div().flex_1())
       .child(this.footer(t));
   }

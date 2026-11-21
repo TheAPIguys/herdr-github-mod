@@ -63,3 +63,17 @@ test('modal retains supported variant choices and clears unsupported choices', (
   modal.pickModel({ id: 'example/other', efforts: ['low'] }, modal.effort);
   assert.equal(modal.effort, null);
 });
+
+test('an explicit default reasoning choice survives model switches', () => {
+  const main = fs.readFileSync(new URL('../mods/issue-agent/main.js', import.meta.url), 'utf8')
+    .replace(/^import .*;\n/gm, '').replace('export default class IssueAgent', 'class IssueAgent');
+  const { IssueAgent } = vm.runInNewContext(main + '\n;({IssueAgent})', { View: class {} });
+  const modal = new IssueAgent();
+  const model = { id: 'example/model', efforts: ['low', 'high'], effort: 'high' };
+  modal.pickModel(model);
+  assert.equal(modal.effort, 'high');
+  modal.pickModel(model, null);
+  assert.equal(modal.effort, null);
+  modal.pickModel({ id: 'example/other', efforts: ['low', 'high'], effort: 'high' }, null);
+  assert.equal(modal.effort, null);
+});
