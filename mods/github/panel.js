@@ -1,6 +1,7 @@
 import { div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, theme, nextCommand, openOverlay, shared, setShared } from "herdr";
+import { applyBlocked, blockedCounts, blockedLabel, blockedQuery } from "./blocked.js";
 import { listKey, readList, readMeta, writeList, writeMeta } from "./cache.js";
 import { summarizeChecks, checksIcon } from "./checks.js";
 import { groupIssues, groupLabel, subIssueCountLabel } from "./group.js";
@@ -73,6 +74,19 @@ async function gh(args, cwd, on) {
   const r = await exec("gh", args, { cwd, on });
   if (r.code !== 0) throw new Error(friendlyError(r.stderr || r.stdout));
   return JSON.parse(r.stdout);
+}
+
+/** Add unresolved blocked-by counts to loaded issues; a failed lookup never hides the list. */
+async function withBlocked(items, cwd, on) {
+  if (!Array.isArray(items) || !items.length) return items;
+  const target = issueTarget(items[0]?.url, items[0]?.url);
+  const query = target && blockedQuery(target.owner, target.repo, items.map((item) => item.number));
+  if (!query) return items;
+  try {
+    return applyBlocked(items, blockedCounts(await gh(["api", "graphql", "-f", `query=${query}`], cwd, on)));
+  } catch {
+    return items;
+  }
 }
 
 /** Filter on GitHub before applying the result limit, including milestones with spaces. */
@@ -163,7 +177,8 @@ export class Panel {
     for (const kind of needed) {
       cx.spawn(async (cx) => {
         try {
-          const items = await gh(listArgs(kind, filters), cwd, on);
+          let items = await gh(listArgs(kind, filters), cwd, on);
+          if (kind === "issues") items = await withBlocked(items, cwd, on);
           if (generation === this.generation) {
             this.items = { ...this.items, [kind]: items };
             this.itemsQuery = filters.text;
@@ -302,7 +317,8 @@ export class Panel {
     let request;
     request = (async () => {
       try {
-        const item = await gh(viewArgs(kind, number), cwd, on);
+        let item = await gh(viewArgs(kind, number), cwd, on);
+        if (kind === "issues") [item] = await withBlocked([item], cwd, on);
         if (context === this.context) {
           this.numberCache.set(id, { item, at: Date.now() });
           if (this.numberCache.size > 20) this.numberCache.delete(this.numberCache.keys().next().value);
@@ -472,6 +488,10 @@ export class Panel {
   issueMeta(issue, t, extra = {}) {
     return h_flex().gap(6).text_size(11).text_color(t.dim).min_w(0).overflow_hidden()
       .when(Boolean(extra.group), (e) => e.child(div().min_w(0).truncate().text_color(t.accent).child(extra.group)))
+      .when(issue.state === "OPEN" && Boolean(blockedLabel(issue.blockedBy)), (e) => e.child(div()
+        .id(`gh-blocked-${issue.number}`).flex_none().px(5).rounded(4).border_1().border_color(t.blocked)
+        .text_color(t.blocked).child(blockedLabel(issue.blockedBy))
+        .tooltip(`Blocked by ${issue.blockedBy} unresolved issue${issue.blockedBy === 1 ? "" : "s"}`)))
       .children((issue.labels ?? []).slice(0, 3).map((l) => div().px(5).rounded(4).border_1().border_color(`#${l.color}88`).text_color(t.muted).child(l.name)))
       .when(issue.state && issue.state !== "OPEN", (e) => e.child(div().text_color(t.muted).child(issue.state.toLowerCase())))
       .when(Boolean(extra.parent), (e) => e.child(div().flex_none().text_color(t.dim).child(extra.parent)));

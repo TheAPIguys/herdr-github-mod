@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { applyBlocked, blockedCounts, blockedLabel, blockedQuery } from '../mods/github/blocked.js';
 import { emptyCache, listKey, readList, readMeta, writeList, writeMeta } from '../mods/github/cache.js';
+import { issueTarget } from '../mods/github/issue-model.js';
 
 // Test pure query construction without requiring Herdr's native JS runtime.
 const source = fs.readFileSync(new URL('../mods/github/panel.js', import.meta.url), 'utf8')
@@ -132,6 +134,51 @@ test('refresh renders cached issues immediately and only fetches a missing tab',
   await Promise.all(tasks);
   assert.equal(JSON.stringify(panel.items.prs), '[{"number":2}]');
   assert.equal(panel.loading, false);
+});
+
+test('refresh adds unresolved blocked-by counts to the issue list and its cache', async () => {
+  const filters = { sort: SORTS[0], labels: new Set(), text: '', milestone: null };
+  const context = JSON.stringify({ cwd: '/repo', on: null });
+  const store = { value: writeList(emptyCache(), listKey(context, filters), 'prs', [], '', Date.now()) };
+  const calls = [], tasks = [];
+  const cx = { notify() {}, spawn(body) { tasks.push(body(cx)); } };
+  const items = [
+    { number: 227, title: 'Blocked', url: 'https://github.com/acme/widgets/issues/227', state: 'OPEN' },
+    { number: 228, title: 'Free', url: 'https://github.com/acme/widgets/issues/228', state: 'OPEN' },
+  ];
+  const { Panel: TestPanel } = vm.runInNewContext(source + '\n;({Panel})', {
+    ...search, ...group, issueTarget, applyBlocked, blockedCounts, blockedLabel, blockedQuery,
+    spaces: () => [{ active: true, folder: '/repo', machine: null }],
+    focused: () => ({ pane: 'pane', cwd: '/repo' }),
+    panes: () => [{ pane: 'pane', cwd: '/repo' }],
+    shared: () => store.value,
+    setShared: (_key, value) => { store.value = value; },
+    listKey, readList, readMeta: () => null, writeList, writeMeta: () => store.value,
+    exec: async (_command, args) => {
+      calls.push(args);
+      if (args[0] === 'issue') return { code: 0, stdout: JSON.stringify(items) };
+      if (args[0] !== 'api' || args[1] !== 'graphql') throw new Error(`unexpected command: ${args[0]}`);
+      return { code: 0, stdout: JSON.stringify({ data: { repository: {
+        i227: { issueDependenciesSummary: { blockedBy: 2 } },
+        i228: { issueDependenciesSummary: { blockedBy: 0 } },
+      } } }) };
+    },
+  });
+  const panel = new TestPanel();
+  panel.context = context; panel.generation = 0; panel.filters = filters;
+  panel.items = { prs: [], issues: [] }; panel.errors = { prs: null, issues: null };
+  panel.loadingKinds = new Set(); panel.loading = false; panel.tab = 'issues';
+  panel.query = ''; panel.itemsQuery = null;
+  panel.refresh(cx);
+  await Promise.all(tasks);
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[1][3], /i227:issue\(number:227\)/);
+  assert.match(calls[1][3], /owner:"acme",name:"widgets"/);
+  assert.equal(panel.items.issues[0].blockedBy, 2);
+  assert.equal('blockedBy' in panel.items.issues[1], false);
+  const cached = readList(store.value, listKey(context, filters));
+  assert.equal(cached.issues.items[0].blockedBy, 2, 'blocked counts are cached with the list');
 });
 
 test('typing filters the loaded page immediately, and a number selects one row', () => {

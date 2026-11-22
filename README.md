@@ -13,6 +13,8 @@ This is not the separate `git-d-herdr` terminal dashboard.
   the loaded page.
 - A lone `#123` looks up that issue or PR directly, including closed items not
   shown in the open list. Enter opens it.
+- Blocked issues show a **⊘ Blocked · N** pill in the Issues list, matching the
+  reader's indicator, from GitHub's unresolved blocked-by counts.
 - Milestone filter: all milestones, one named milestone, or no milestone.
   Closed milestones are available too; lists show **open** issues/PRs only.
 - Wider 780 × 680 popup and larger, wrapping titles.
@@ -73,6 +75,8 @@ natively (not in a web browser). Task checkboxes are read-only text markers.
 An amber **Blocked · N** badge beside Open shows unresolved dependencies from
 GitHub's native "blocked by" relationships. Closed blockers do not contribute;
 mentions such as "Depends on #123" in prose alone do not create a dependency.
+The Issues list shows the same badge on each blocked row, so blockers are
+visible before opening an issue.
 
 Issue references such as `#123` and full issue links navigate within the reader,
 including closed issues and other repositories on the same GitHub host.
@@ -184,7 +188,9 @@ that someone is actively working. Closed tabs no longer count. Discovery runs
 every two seconds; repository lookups are cached in memory for one minute.
 
 The panel runs authenticated `gh` commands to read repository issues, PRs,
-labels, milestones, and CI checks. The Agent action runs Git to create a
+labels, milestones, and CI checks. The Issues list makes one additional batched
+GraphQL request for unresolved blocked-by counts; if it fails, issues still
+load without the badge. The Agent action runs Git to create a
 worktree, may copy selected ignored files using `rsync`, and launches your
 chosen agent. The CI view can inspect the branches of open Herdr spaces.
 Session indicators read Herdr's open tabs/panes and use `gh repo view` in
