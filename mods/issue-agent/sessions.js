@@ -19,9 +19,17 @@ export function issueKey(url) {
 
 /** Only explicit #N tab names or issue-style branches identify work; never title substrings. */
 export function sessionCandidates(allSpaces, allPanes) {
+  const panesByTab = new Map();
+  for (const pane of allPanes) {
+    if (!pane.terminal || !pane.cwd) continue;
+    let tabPanes = panesByTab.get(pane.tab);
+    if (!tabPanes) { tabPanes = []; panesByTab.set(pane.tab, tabPanes); }
+    tabPanes.push(pane);
+  }
+
   const result = [];
   for (const space of allSpaces) for (const tab of space.tabs) {
-    for (const pane of allPanes.filter((p) => p.tab === tab.id && p.terminal && p.cwd)) {
+    for (const pane of panesByTab.get(tab.id) ?? []) {
       const named = tab.named ? /^#([1-9][0-9]*)$/.exec(tab.name) : null;
       const branch = /^[^/]+\/([1-9][0-9]*)-/.exec(pane.branch ?? "");
       // Conflicting identifiers are ambiguous, so do not claim a match.
@@ -51,9 +59,15 @@ export class IssueSessions {
     cx.timer.every(2000, (cx) => this.refresh(cx));
   }
 
-  matches(url) {
+  /** Capture candidate sessions once so all rows in one render share a snapshot. */
+  snapshot() {
+    return sessionCandidates(spaces(), panes());
+  }
+
+  /** Match an issue against resolved sessions and one optional render snapshot. */
+  matches(url, candidates = null) {
     const key = issueKey(url);
-    const live = new Set(sessionCandidates(spaces(), panes()).map((s) => JSON.stringify(s)));
+    const live = new Set((candidates ?? this.snapshot()).map((s) => JSON.stringify(s)));
     const matches = this.entries.filter((s) => s.key === key && live.has(JSON.stringify(s.session))).map((s) => s.session);
     return [...new Map(matches.map((s) => [s.tab, s])).values()];
   }
@@ -63,7 +77,7 @@ export class IssueSessions {
     this.busy = true;
     cx.spawn(async (cx) => {
       try {
-        const candidates = sessionCandidates(spaces(), panes());
+        const candidates = this.snapshot();
         const locations = new Map(candidates.map((s) => [JSON.stringify([s.on, s.cwd]), s]));
         for (const key of this.cache.keys()) if (!locations.has(key)) this.cache.delete(key);
         await Promise.all([...locations].map(async ([key, s]) => {

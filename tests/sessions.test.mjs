@@ -55,6 +55,17 @@ test('custom branch names work with #N tabs; renamed tabs work with issue branch
   assert.equal(h.sessionCandidates(h.state.spaces, h.state.panes).length, 0);
 });
 
+test('one render snapshot can be reused while live lookups still see closed tabs', async () => {
+  const h = harness(), tracker = new h.IssueSessions();
+  tracker.init(h.cx);
+  await h.done();
+  const snapshot = tracker.snapshot();
+  h.state.panes = [];
+
+  assert.equal(tracker.matches(url, snapshot).length, 1, 'rows in one render use the same candidate snapshot');
+  assert.equal(tracker.matches(url).length, 0, 'a fresh lookup immediately drops closed sessions');
+});
+
 test('remote resolution preserves machine and cwd; render-time matching is read-only', async () => {
   const h = harness(), tracker = new h.IssueSessions();
   h.state.spaces[0].machine = 'remote';

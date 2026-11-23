@@ -507,7 +507,7 @@ export class Panel {
     const target = issueTarget(item.url, item.url);
     if (!target) return openUrl(item.url);
     this.reader = new IssueReader(location(), target, (issue, source) => this.startAgent(issue, source),
-      (url) => this.sessions.matches(url));
+      (url) => this.sessions.matches(url, this.renderSessionCandidates));
     this.reader.open(target, cx);
   }
 
@@ -519,7 +519,9 @@ export class Panel {
   }
 
   row(item, t, options = {}) {
-    const sessions = this.tab === "issues" ? this.sessions.matches(item.url) : [];
+    const sessions = this.tab === "issues"
+      ? this.sessions.matches(item.url, this.renderSessionCandidates)
+      : [];
     const group = options.group ?? null;
     const groupText = group ? groupLabel(group.summary)
       : this.tab === "issues" && !options.child ? subIssueCountLabel(item) : null;
@@ -585,12 +587,14 @@ export class Panel {
   }
 
   render(cx) {
+    this.renderSessionCandidates = this.sessions?.snapshot() ?? [];
     if (this.reader?.nav.current) return this.reader.render();
     const t = theme(), list = this.visibleItems(), nodes = this.displayNodes();
     return v_flex().id("github").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
         .child(this.tabButton("prs", t)).child(this.tabButton("issues", t)).child(div().flex_1())
-        .when(this.tab === "issues" && list.some((item) => this.sessions.matches(item.url).length),
+        .when(this.tab === "issues" && list.some((item) =>
+          this.sessions.matches(item.url, this.renderSessionCandidates).length),
           (e) => e.child(div().text_size(10).text_color("#f59e0b").child("● Session open")))
         .child(div().id("gh-refresh").px(8).h(26).flex().items_center().rounded(7).cursor_pointer().text_size(11).text_color(t.muted)
           .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.refresh(cx, true)).child(this.isLoading() ? "…" : "Refresh")))

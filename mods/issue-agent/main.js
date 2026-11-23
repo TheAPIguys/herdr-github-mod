@@ -123,9 +123,12 @@ async function createWorktree(cwd, on, branch) {
 async function modelsFor(agent, on, cwd) {
   const cache = shared(MODEL_CACHE) ?? {};
   const key = JSON.stringify([on ?? null, cwd, agent.key]);
-  if (cache[key] && Date.now() - cache[key].at < CACHE_MS) return cache[key].models;
+  const cachedModels = cache[key]?.models;
+  if (Array.isArray(cachedModels) && cachedModels.length > 0 && Date.now() - cache[key].at < CACHE_MS) {
+    return cachedModels;
+  }
   const models = await adapterFor(agent).models(on, cwd);
-  setShared(MODEL_CACHE, { ...cache, [key]: { at: Date.now(), models } });
+  if (models.length > 0) setShared(MODEL_CACHE, { ...cache, [key]: { at: Date.now(), models } });
   return models;
 }
 
@@ -436,7 +439,8 @@ export default class IssueAgent extends View {
 
   render(cx) {
     const t = theme(), hasModels = this.agent && adapterFor(this.agent);
-    const sessions = this.sessions.matches(this.issue.url);
+    const candidates = this.sessions.snapshot();
+    const sessions = this.sessions.matches(this.issue.url, candidates);
     return v_flex().id("issue-agent").size_full().min_h(0).p(16).gap(12).bg(t.popover).text_color(t.foreground).text_size(12.5)
       .child(v_flex().gap(2)
         .child(div().text_size(14).font_semibold().child(`Start an agent on #${this.issue.number}`))

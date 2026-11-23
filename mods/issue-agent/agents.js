@@ -34,14 +34,18 @@ function piModels(out) {
 
 async function opencodeModels(on, cwd) {
   const endpoint = `/api/model?location[directory]=${encodeURIComponent(cwd)}&types=chat`;
-  const result = await exec("opencode", ["api", "get", endpoint], { cwd, on });
-  if (result.code !== 0) throw new Error((result.stderr || result.stdout || "Couldn't list OpenCode models.").trim());
-  const models = JSON.parse(result.stdout).data;
-  if (!Array.isArray(models)) throw new Error("OpenCode did not return a valid model list.");
-  return models.filter((m) => m.enabled !== false && m.type === "chat").map((m) => ({
-    id: `${m.providerID}/${m.id}`, label: m.name,
-    efforts: (m.variants ?? []).map((v) => v.id),
-  }));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await exec("opencode", ["api", "get", endpoint], { cwd, on });
+    if (result.code !== 0) throw new Error((result.stderr || result.stdout || "Couldn't list OpenCode models.").trim());
+    const models = JSON.parse(result.stdout).data;
+    if (!Array.isArray(models)) throw new Error("OpenCode did not return a valid model list.");
+    const available = models.filter((m) => m.enabled !== false && m.type === "chat").map((m) => ({
+      id: `${m.providerID}/${m.id}`, label: m.name,
+      efforts: (m.variants ?? []).map((v) => v.id),
+    }));
+    if (available.length) return available;
+  }
+  throw new Error("OpenCode returned no chat models for this workspace. Check its provider setup and try again.");
 }
 
 /** Prepare a model-selected session without running a task, then open the full TUI. */
